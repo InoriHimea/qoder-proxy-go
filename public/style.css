@@ -95,8 +95,8 @@ input,textarea{font-family:inherit}
 .ep-path{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--text1)}
 .ep-body{padding:12px 16px}
 .ep-desc{font-size:13px;color:var(--text2);margin-bottom:10px}
-.ep-curl{background:var(--surface);border-radius:7px;padding:10px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#a5b4fc;white-space:pre-wrap;word-break:break-all;position:relative}
-.copy-curl{position:absolute;top:6px;right:6px;padding:3px 7px;font-size:10px;background:var(--elevated);border:1px solid var(--border);border-radius:5px;color:var(--text2);transition:all .15s}
+.ep-curl{background:var(--surface);border-radius:7px;padding:10px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#a5b4fc;white-space:pre-wrap;word-break:break-all;position:relative}      
+.copy-curl{position:absolute;top:6px;right:6px;padding:3px 7px;font-size:10px;background:var(--elevated);border:1px solid var(--border);border-radius:5px;color:var(--text2);transition:all .15s}       
 .copy-curl:hover{color:var(--accent);border-color:var(--accent)}
 
 /* ── Compat badges ───────────────────────────────────────────────────────── */
@@ -175,7 +175,7 @@ input,textarea{font-family:inherit}
 .filter-input:focus{border-color:var(--accent)}
 .table-wrap{overflow-x:auto;background:var(--card);border:1px solid var(--border);border-radius:var(--radius)}
 table{width:100%;border-collapse:collapse;font-size:13px}
-thead th{padding:10px 14px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);border-bottom:1px solid var(--border);white-space:nowrap}
+thead th{padding:10px 14px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);border-bottom:1px solid var(--border);white-space:nowrap}    
 tbody tr{border-bottom:1px solid var(--border);transition:background .15s;cursor:pointer}
 tbody tr:last-child{border-bottom:none}
 tbody tr:hover{background:rgba(255,255,255,.03)}
@@ -223,3 +223,15 @@ td{padding:10px 14px;color:var(--text2);vertical-align:middle}
 .loading-screen{flex:1;display:flex;align-items:center;justify-content:center}
 .auto-refresh-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:transparent;transition:all .15s}
 .auto-refresh-toggle.on{border-color:var(--success);color:var(--success)}
+
+/* Modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:1000;padding:20px;backdrop-filter:blur(4px)}
+.modal-overlay.open{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border-accent);border-radius:16px;width:100%;max-width:900px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,0.8);animation:modal-in .25s ease-out}
+@keyframes modal-in{from{opacity:0;transform:scale(.95) translateY(10px)}to{opacity:1;transform:none}}
+.modal-header{padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.modal-title{font-size:16px;font-weight:600}
+.modal-close{background:transparent;border:none;color:var(--text3);padding:4px;display:flex;transition:color .2s}
+.modal-close:hover{color:var(--error)}
+.modal-body{flex:1;overflow-y:auto;padding:24px}
+.modal-footer{padding:14px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end}

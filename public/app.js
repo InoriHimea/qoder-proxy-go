@@ -80,10 +80,10 @@ function showToast(msg, type = 'success') {
 }
 
 // ── Routing ──────────────────────────────────────────────────────────────────
-const routes = { 
-  endpoints: renderEndpoints, 
-  playground: renderPlayground, 
-  logs: renderLogs, 
+const routes = {
+  endpoints: renderEndpoints,
+  playground: renderPlayground,
+  logs: renderLogs,
   'system-logs': renderSystemLogs,
   settings: renderSettings,
   usage: renderUsage
@@ -113,7 +113,7 @@ async function fetchStatus() {
     dot.className = `status-dot status-${d.status === 'ok' ? 'ok' : 'degraded'}`;
     lbl.textContent = d.status === 'ok' ? 'Online' : 'Degraded';
     lbl.style.color = d.status === 'ok' ? '#34d399' : '#f87171';
-    $('qodercli-ver').textContent = `qodercli ${d.qodercli}`;
+    $('qodercli-ver').textContent = `qodercli ${d.qodercli || '1.x'}`;
     $('uptime-label').textContent = `Up ${fmtUptime(d.uptime)}`;
     $('mem-label').textContent = `${d.memoryMB} MB`;
     $('sidebar-version').textContent = `v${d.version}`;
@@ -124,7 +124,7 @@ async function fetchStatus() {
 function renderUsage() {
   $('content').innerHTML = `
     <div class="page-header"><div><h1 class="page-title">Usage & Credits</h1><p class="page-sub">Local usage tracking for proxy requests</p></div></div>
-    
+
     <div class="card">
       <div class="card-title">Overview</div>
       <div id="usage-overview">Loading...</div>
@@ -135,27 +135,37 @@ function renderUsage() {
       <div class="card-title">Recent Requests</div>
       <div class="table-wrap" id="usage-records">Loading...</div>
     </div>`;
-    
+
   fetchUsage();
 }
 
 async function fetchUsage() {
   try {
     const data = await api('/usage/local');
-    
+
     // Render Overview
     let overviewHtml = `
-      <div style="display: flex; gap: 20px; margin-bottom: 20px;">
-        <div><strong>Total Requests:</strong> ${data.total_requests}</div>
-        <div><strong>Total Errors:</strong> ${data.total_errors}</div>
+      <div style="display: flex; gap: 40px; margin-bottom: 20px;">
+        <div class="stat-item">
+          <div class="stat-label" style="font-size:12px; color:var(--text3); text-transform:uppercase;">Total Requests</div>
+          <div class="stat-value" style="font-size:24px; font-weight:700;">${data.total_requests}</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label" style="font-size:12px; color:var(--text3); text-transform:uppercase;">Total Errors</div>
+          <div class="stat-value" style="font-size:24px; font-weight:700; color:#f87171">${data.total_errors}</div>
+        </div>
       </div>
-      <h4>Requests by Model:</h4>
-      <ul>
+      <h4 style="margin-bottom:12px; font-size:14px; color:var(--text2)">Requests by Model</h4>
+      <div class="model-stats-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:12px;">
     `;
     for (const [model, count] of Object.entries(data.requests_by_model || {})) {
-      overviewHtml += `<li><code>${escHtml(model)}</code>: ${count} requests</li>`;
+      overviewHtml += `
+        <div class="card card-sm" style="background:var(--elevated); padding: 12px;">
+          <div style="font-size:11px; color:var(--text3); margin-bottom:4px; text-overflow:ellipsis; overflow:hidden;">${escHtml(model)}</div>
+          <div style="font-size:18px; font-weight:600;">${count}</div>
+        </div>`;
     }
-    overviewHtml += `</ul>`;
+    overviewHtml += `</div>`;
     const overviewEl = $('usage-overview');
     if (overviewEl) overviewEl.innerHTML = overviewHtml;
 
@@ -173,18 +183,18 @@ async function fetchUsage() {
               <th>Model</th>
               <th>Input Chars</th>
               <th>Output Chars</th>
-              <th>Duration (ms)</th>
+              <th>Duration</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody>
             ${records.map(r => `
               <tr>
-                <td>${fmtTime(r.timestamp)}</td>
+                <td class="td-ts">${fmtTime(r.timestamp)}</td>
                 <td><code>${escHtml(r.model)}</code></td>
                 <td>${r.input_length}</td>
                 <td>${r.output_length}</td>
-                <td>${r.duration_ms}</td>
+                <td>${fmtMs(r.duration_ms)}</td>
                 <td><span class="status-chip ${r.is_error ? 's5xx' : 's2xx'}">${r.is_error ? 'Error' : 'OK'}</span></td>
               </tr>
             `).join('')}
@@ -245,8 +255,11 @@ function renderEndpoints() {
   const endpoints = [
     { method:'GET',  path:'/v1/models',            desc:'List all available models and aliases.',        curl:`curl ${v1}/models${key ? ` \\\n  -H "Authorization: Bearer ${key}"` : ''}` },
     { method:'POST', path:'/v1/chat/completions',  desc:'OpenAI-compatible chat completions (streaming supported).', curl:`curl ${v1}/chat/completions \\\n  -H "Content-Type: application/json"${key ? ` \\\n  -H "Authorization: Bearer ${key}"` : ''} \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Hello!"}]}'` },
-    { method:'POST', path:'/v1/completions',       desc:'Legacy text completions endpoint.',             curl:`curl ${v1}/completions \\\n  -H "Content-Type: application/json"${key ? ` \\\n  -H "Authorization: Bearer ${key}"` : ''} \\\n  -d '{"model":"auto","prompt":"Once upon a time"}'` },
-    { method:'GET',  path:'/health',               desc:'Health check — returns qodercli version and server status.',curl:`curl ${base}/health` },
+    { method:'POST', path:'/v/chat',               desc:'Alias for chat completions.',                   curl:`curl ${base}/v/chat \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Hi!"}]}'` },
+    { method:'POST', path:'/v1/messages',          desc:'Anthropic-compatible messages endpoint.',       curl:`curl ${v1}/messages \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"claude-3-5-sonnet-20240620","messages":[{"role":"user","content":"Hello!"}]}'` },
+    { method:'POST', path:'/responses',            desc:'Codex-style completion endpoint.',              curl:`curl ${base}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Write code"}]}'` },
+    { method:'POST', path:'/v1/responses',         desc:'Codex-style endpoint alias.',                   curl:`curl ${v1}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Code"}]}'` },
+    { method:'GET',  path:'/health',               desc:'Health check — returns server status.',         curl:`curl ${base}/health` },
   ];
 
   const epCards = endpoints.map((ep, i) => `
@@ -262,7 +275,7 @@ function renderEndpoints() {
     </div>`).join('');
 
   $('content').innerHTML = `
-    <div class="page-header"><div><h1 class="page-title">Endpoints</h1><p class="page-sub">Your OpenAI-compatible proxy — drop this URL into any app</p></div></div>
+    <div class="page-header"><div><h1 class="page-title">Endpoints</h1><p class="page-sub">Your multi-protocol AI proxy — Drop this URL into any application</p></div></div>
     <div class="hero-card">
       <div class="hero-label">🌐 Base URL (OpenAI-compatible)</div>
       <div class="hero-url" id="hero-url">${escHtml(v1)}</div>
@@ -322,6 +335,10 @@ window.selectModel = (id) => {
 function renderMessages() {
   const area = $('chat-area');
   if (!area) return;
+  if (state.chat.messages.length === 0) {
+    area.innerHTML = '<div class="chat-empty"><p>Select a model and start a conversation.</p></div>';
+    return;
+  }
   area.innerHTML = state.chat.messages.map(m => `
     <div class="msg msg-${m.role}">
       <div class="msg-bubble">${m.role === 'assistant' ? mdToHtml(m.content) : escHtml(m.content)}</div>
@@ -375,7 +392,7 @@ window.sendMessage = async () => {
 function renderSettings() {
   $('content').innerHTML = `
     <div class="page-header"><div><h1 class="page-title">Settings</h1><p class="page-sub">Configure backend, token and model list</p></div></div>
-    
+
     <div class="card">
       <div class="card-title">Core Configuration</div>
       <div class="settings-form">
@@ -444,7 +461,7 @@ window.deleteModel = (i) => {
 window.saveSettings = async () => {
   const backend = $('set-backend').value;
   const token = $('set-token').value;
-  
+
   try {
     await api('/dashboard/api/settings', {
       method: 'POST',
@@ -459,41 +476,120 @@ window.saveSettings = async () => {
 };
 
 // ── Page: Logs & System Logs ──────────────────────────────────────────────────
-// (Same as before, simplified for brevity but functional)
 function renderLogs() {
   $('content').innerHTML = `
-    <div class="page-header"><div><h1 class="page-title">Request Logs</h1></div></div>
+    <div class="page-header">
+      <div><h1 class="page-title">Request Logs</h1><p class="page-sub">Recent traffic through the proxy</p></div>
+      <div class="logs-toolbar-right">
+        <button class="btn btn-ghost btn-sm" onclick="fetchLogs()">Refresh</button>
+        <button class="btn btn-danger btn-sm" onclick="clearLogs()">Clear</button>
+      </div>
+    </div>
     <div id="log-list" class="table-wrap">Loading...</div>`;
-  api('/dashboard/api/logs').then(d => {
-    if (!d.logs || !d.logs.length) {
-      $('log-list').innerHTML = '<div class="empty-state">No requests yet</div>';
+  fetchLogs();
+}
+
+async function fetchLogs() {
+  try {
+    const d = await api('/dashboard/api/logs');
+    state.logs.entries = d.logs || [];
+    const area = $('log-list');
+    if (!area) return;
+
+    if (state.logs.entries.length === 0) {
+      area.innerHTML = '<div class="empty-state">No logs yet.</div>';
       return;
     }
-    const html = d.logs.reverse().map(l => {
-      const sseBadge = l.is_sse ? '<span class="tier-badge tier-paid">SSE</span>' : '<span class="tier-badge tier-free">Sync</span>';
-      const bodyStr = syntaxJson(l.body);
-      return `
-      <div style="border-bottom: 1px solid var(--border); padding: 15px 0;">
-        <div style="display:flex; justify-content:space-between; margin-bottom: 10px;">
-          <strong style="font-size: 14px;">${fmtTime(l.timestamp)} | ${l.method} ${l.path}</strong>
-          <div>Status: <span class="status-chip ${l.statusCode>=400?'s5xx':'s2xx'}">${l.statusCode}</span> ${sseBadge}</div>
-        </div>
-        <div style="background:var(--surface); padding:10px; border-radius:8px; font-size:13px; max-height:250px; overflow-y:auto; border: 1px solid var(--border);">
-          ${bodyStr}
-        </div>
-      </div>`;
-    }).join('');
-    $('log-list').innerHTML = html;
-  });
+
+    area.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Method</th>
+            <th>Path</th>
+            <th>Status</th>
+            <th>SSE</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${state.logs.entries.map(l => `
+            <tr onclick="showLogDetail('${l.id}')">
+              <td class="td-ts">${fmtTime(l.timestamp)}</td>
+              <td><span class="method-badge method-${l.method}">${l.method}</span></td>
+              <td class="td-path">${escHtml(l.path)}</td>
+              <td><span class="status-chip ${l.statusCode < 400 ? 's2xx' : l.statusCode < 500 ? 's4xx' : 's5xx'}">${l.statusCode}</span></td>
+              <td>${l.is_sse ? '<span class="stream-chip">SSE</span>' : '—'}</td>
+            </tr>
+          `).reverse().join('')}
+        </tbody>
+      </table>`;
+  } catch (err) { showToast('Failed to fetch logs', 'error'); }
 }
+
+window.showLogDetail = async (id) => {
+  const modal = $('log-modal');
+  const body = $('log-modal-body');
+  modal.classList.add('open');
+  body.innerHTML = '<div class="spinner"></div>';
+  
+  try {
+    const data = await api(`/dashboard/api/logs/${id}`);
+    body.innerHTML = `
+      <div class="log-detail-grid">
+        <div>
+          <div class="log-detail-label">Request Body</div>
+          <div class="json-block">${syntaxJson(data.body)}</div>
+        </div>
+        <div>
+          <div class="log-detail-label">Response Data</div>
+          <div class="json-block">${syntaxJson(data.response_body)}</div>
+        </div>
+      </div>
+      <div style="margin-top:20px;">
+        <div class="log-detail-label">Full Metadata</div>
+        <div class="json-block">${syntaxJson({
+          id: data.id,
+          timestamp: data.timestamp,
+          method: data.method,
+          path: data.path,
+          statusCode: data.statusCode,
+          isSSE: data.is_sse
+        })}</div>
+      </div>
+    `;
+  } catch (err) { body.innerHTML = `<div class="empty-state" style="color:var(--error)">Failed to load detail: ${err.message}</div>`; }
+};
+
+window.closeLogModal = () => $('log-modal').classList.remove('open');
+window.clearLogs = async () => {
+  if (!confirm('Clear all request logs?')) return;
+  await api('/dashboard/api/logs', { method: 'DELETE' });
+  fetchLogs();
+};
 
 function renderSystemLogs() {
   $('content').innerHTML = `
-    <div class="page-header"><div><h1 class="page-title">System Logs</h1></div></div>
+    <div class="page-header">
+      <div><h1 class="page-title">System Logs</h1><p class="page-sub">Runtime events and process output</p></div>
+      <button class="btn btn-ghost btn-sm" onclick="fetchSystemLogs()">Refresh</button>
+    </div>
     <div id="sys-list" class="terminal">Loading...</div>`;
-  api('/dashboard/api/logs/system').then(d => {
-    $('sys-list').innerHTML = d.logs.reverse().map(l => `<div>[${fmtTime(l.timestamp)}] ${l.message}</div>`).join('');
-  });
+  fetchSystemLogs();
+}
+
+async function fetchSystemLogs() {
+  try {
+    const d = await api('/dashboard/api/logs/system');
+    const area = $('sys-list');
+    if (!area) return;
+    area.innerHTML = d.logs.map(l => `
+      <div class="log-line level-${l.level}">
+        <span class="log-ts">[${fmtTime(l.timestamp)}]</span>
+        <span class="log-src src-${l.source || 'system'}">${l.source || 'SYS'}</span>
+        <span class="log-msg">${escHtml(l.message)}</span>
+      </div>`).reverse().join('');
+  } catch (err) { showToast('Failed to fetch system logs', 'error'); }
 }
 
 init();
