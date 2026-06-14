@@ -15,11 +15,11 @@ type Model struct {
 }
 
 type Config struct {
-	Backend string  `json:"backend"`
-	Token   string  `json:"token"`
-	Models  []Model `json:"models"`
+        Backend       string  `json:"backend"`
+        Token         string  `json:"token"`
+        UseDirectAPI  bool    `json:"use_direct_api"`
+        Models        []Model `json:"models"`
 }
-
 var DefaultModels = []Model{
 	{ID: "auto", Label: "Auto (Smart Select)", Tier: "paid", Description: "Paid tier — automatically selects the best model per task."},
 	{ID: "ultimate", Label: "Ultimate (Best Quality)", Tier: "paid", Description: "Paid tier — top-tier model, maximum quality."},

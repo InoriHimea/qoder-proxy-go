@@ -72,13 +72,20 @@ func extractContentText(content interface{}) string {
 	return ""
 }
 
-func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *UsageManager) {
+func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *UsageManager, dc *DirectClient) {
 	started := time.Now()
 	var req AnthropicRequest
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		ctx.Error("Invalid JSON", http.StatusBadRequest)
 		um.Record("unknown", 0, 0, true, time.Since(started).Milliseconds())
 		return
+	}
+
+	cfg := cm.Get()
+	if cfg.UseDirectAPI {
+		// Convert Anthropic to OpenAI-style ChatRequest for our simple DirectClient
+		// Or implement HandleAnthropic in DirectClient. For now, we skip it or use CLI.
+		AddSystemLog("Direct API requested but not yet fully implemented for Anthropic protocol. Falling back to CLI.", "warn", "direct")
 	}
 
 	prompt := anthropicMessagesToPrompt(req)
@@ -100,6 +107,9 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 
 	if !req.Stream {
 		scanner := bufio.NewScanner(stdout)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 10*1024*1024)
+		
 		var fullContent strings.Builder
 		for scanner.Scan() {
 			var line map[string]interface{}
@@ -111,6 +121,11 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 				}
 			}
 		}
+		
+		if err := scanner.Err(); err != nil {
+			AddSystemLog(fmt.Sprintf("Scanner error in anthropic non-stream: %v", err), "error", "cli")
+		}
+		
 		outStr := fullContent.String()
 		respData := buildAnthropicFullResponse(id, req.Model, outStr)
 		ctx.SetUserValue("response_body", respData)
@@ -158,12 +173,19 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 	})
 }
 
-func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *UsageManager) {
+func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *UsageManager, dc *DirectClient) {
 	started := time.Now()
 	var req ChatRequest
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		ctx.Error("Invalid JSON", http.StatusBadRequest)
 		um.Record("unknown", 0, 0, true, time.Since(started).Milliseconds())
+		return
+	}
+
+	cfg := cm.Get()
+	if cfg.UseDirectAPI {
+		AddSystemLog(fmt.Sprintf("Using Direct API for %s", req.Model), "info", "direct")
+		dc.HandleChat(ctx, req, um)
 		return
 	}
 
@@ -191,6 +213,9 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 		}
 		
 		scanner := bufio.NewScanner(stdout)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 10*1024*1024)
+		
 		var contentBuilder strings.Builder
 		var cliErrorMsg string
 		for scanner.Scan() {
@@ -215,6 +240,11 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 				AddSystemLog(fmt.Sprintf("Failed to parse CLI output line: %s", rawLine), "warn", "cli")
 			}
 		}
+		
+		if err := scanner.Err(); err != nil {
+			AddSystemLog(fmt.Sprintf("Scanner error in chat non-stream: %v", err), "error", "cli")
+		}
+		
 		stdout.Close()
 
 		if cliErrorMsg != "" {
@@ -333,41 +363,59 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
 
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
-		scanner := bufio.NewScanner(stdout)
-		outLen := 0
-		for scanner.Scan() {
-			var line map[string]interface{}
-			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-				if line["type"] == "assistant" {
-					if msg, ok := line["message"].(map[string]interface{}); ok {
-						if content := extractContentText(msg["content"]); content != "" {
-							outLen += len(content)
-							chunk := ChatChunk{
-								ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-							}
-							chunk.Choices = []struct {
-								Index int `json:"index"`
-								Delta struct {
-									Role    string `json:"role,omitempty"`
-									Content string `json:"content,omitempty"`
-								} `json:"delta"`
-								FinishReason *string `json:"finish_reason"`
-							}{{Index: 0}}
-							chunk.Choices[0].Delta.Content = content
-							
-							data, _ := json.Marshal(chunk)
-							fmt.Fprintf(w, "data: %s\n\n", data)
-							w.Flush()
-						}
-					}
-				}
-			}
-		}
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		w.Flush()
-		
-		um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
+	        scanner := bufio.NewScanner(stdout)
+	        // Increase buffer size to 10MB to handle large lines
+	        buf := make([]byte, 0, 64*1024)
+	        scanner.Buffer(buf, 10*1024*1024)
+
+	        outLen := 0
+	        for scanner.Scan() {
+	                var line map[string]interface{}
+	                if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
+	                        if line["type"] == "assistant" {
+	                                if msg, ok := line["message"].(map[string]interface{}); ok {
+	                                        if content := extractContentText(msg["content"]); content != "" {
+	                                                outLen += len(content)
+	                                                chunk := ChatChunk{
+	                                                        ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+	                                                }
+	                                                chunk.Choices = []struct {
+	                                                        Index int `json:"index"`
+	                                                        Delta struct {
+	                                                                Role    string `json:"role,omitempty"`
+	                                                                Content string `json:"content,omitempty"`
+	                                                        } `json:"delta"`
+	                                                        FinishReason *string `json:"finish_reason"`
+	                                                }{
+	                                                        {
+	                                                                Index: 0,
+	                                                        },
+	                                                }
+	                                                chunk.Choices[0].Delta.Content = content
+
+	                                                data, _ := json.Marshal(chunk)
+	                                                fmt.Fprintf(w, "data: %s\n\n", data)
+	                                                w.Flush()
+	                                        }
+	                                }
+	                        }
+	                }
+	        }
+
+	        if err := scanner.Err(); err != nil {
+	                AddSystemLog(fmt.Sprintf("Scanner error in chat stream: %v", err), "error", "cli")
+	                // If it's a buffer too long error, we should definitely know
+	                if err == bufio.ErrTooLong {
+	                        AddSystemLog("Line too long for scanner buffer (10MB)", "error", "cli")
+	                }
+	        }
+
+	        fmt.Fprintf(w, "data: [DONE]\n\n")
+	        w.Flush()
+
+	        um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
 	})
+
 }
 
 func handleModels(ctx *fasthttp.RequestCtx, cm *ConfigManager) {

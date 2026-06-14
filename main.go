@@ -30,12 +30,14 @@ func main() {
 		log.Fatalf("Failed to initialize usage manager: %v", err)
 	}
 
+	dc := NewDirectClient(cm)
+
 	r := router.New()
 
 	// ── Public Routes ────────────────────────────────────────────────────────────
 	r.GET("/", func(ctx *fasthttp.RequestCtx) {
 		ctx.SetContentType("application/json")
-		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.0","dashboard":"/dashboard/"}`)
+		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.1","dashboard":"/dashboard/"}`)
 	})
 
 	r.GET("/health", func(ctx *fasthttp.RequestCtx) {
@@ -48,22 +50,26 @@ func main() {
 		handleModels(ctx, cm)
 	})
 	r.POST("/v1/chat/completions", func(ctx *fasthttp.RequestCtx) {
-		handleChatCompletions(ctx, cm, um)
+		handleChatCompletions(ctx, cm, um, dc)
+
 	})
 	r.POST("/v/chat", func(ctx *fasthttp.RequestCtx) {
-		handleChatCompletions(ctx, cm, um)
+		handleChatCompletions(ctx, cm, um, dc)
+
 	})
 	r.POST("/v1/messages", func(ctx *fasthttp.RequestCtx) {
-		handleAnthropicMessages(ctx, cm, um)
+		handleAnthropicMessages(ctx, cm, um, dc)
 	})
 	r.POST("/v1/message", func(ctx *fasthttp.RequestCtx) {
-		handleAnthropicMessages(ctx, cm, um)
+		handleAnthropicMessages(ctx, cm, um, dc)
 	})
 	r.POST("/responses", func(ctx *fasthttp.RequestCtx) {
-		handleChatCompletions(ctx, cm, um)
+		handleChatCompletions(ctx, cm, um, dc)
+
 	})
 	r.POST("/v1/responses", func(ctx *fasthttp.RequestCtx) {
-		handleChatCompletions(ctx, cm, um)
+		handleChatCompletions(ctx, cm, um, dc)
+
 	})
 
 	// ── Usage API ────────────────────────────────────────────────────────────────

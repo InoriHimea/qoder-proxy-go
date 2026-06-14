@@ -55,8 +55,9 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_PERSONAL_ACCESS_TOKEN=%s", config.Token))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("QODERCN_PERSONAL_ACCESS_TOKEN=%s", config.Token))
 	cmd.Env = append(cmd.Env, "NO_BROWSER=1", "CI=1")
-	cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=4096")
-
+	cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=8192")
+	// Some Node.js optimizations for large heap
+	cmd.Env = append(cmd.Env, "V8_FORCE_GC=1") 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

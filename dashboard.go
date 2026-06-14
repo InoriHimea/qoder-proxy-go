@@ -24,19 +24,21 @@ func handleGetSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 	}
 
 	resp := map[string]interface{}{
-		"backend":  cfg.Backend,
-		"token":    maskedToken,
-		"hasToken": cfg.Token != "",
-		"models":   cfg.Models,
+		"backend":      cfg.Backend,
+		"token":        maskedToken,
+		"hasToken":     cfg.Token != "",
+		"useDirectApi": cfg.UseDirectAPI,
+		"models":       cfg.Models,
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }
 
 func handlePostSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 	var input struct {
-		Backend string  `json:"backend"`
-		Token   string  `json:"token"`
-		Models  []Model `json:"models"`
+		Backend      string  `json:"backend"`
+		Token        string  `json:"token"`
+		UseDirectApi bool    `json:"useDirectApi"`
+		Models       []Model `json:"models"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &input); err != nil {
 		ctx.Error("Invalid JSON", http.StatusBadRequest)
@@ -45,9 +47,10 @@ func handlePostSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 
 	current := cm.Get()
 	next := Config{
-		Backend: input.Backend,
-		Token:   input.Token,
-		Models:  input.Models,
+		Backend:      input.Backend,
+		Token:        input.Token,
+		UseDirectAPI: input.UseDirectApi,
+		Models:       input.Models,
 	}
 
 	// Logic to avoid overwriting with masked token
@@ -74,7 +77,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 		"memoryMB":   fmt.Sprintf("%.1f", float64(m.Alloc)/1024/1024),
 		"heapUsedMB": fmt.Sprintf("%.1f", float64(m.HeapAlloc)/1024/1024),
 		"timestamp":  time.Now().Format(time.RFC3339),
-		"version":    "3.2.0-go",
+		"version":    "3.2.1-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }
@@ -82,7 +85,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 func handleConfig(ctx *fasthttp.RequestCtx) {
 	resp := map[string]interface{}{
 		"publicBaseUrl": fmt.Sprintf("http://%s", ctx.Host()),
-		"version":       "3.2.0-go",
+		"version":       "3.2.1-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }

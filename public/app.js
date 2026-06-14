@@ -408,7 +408,14 @@ function renderSettings() {
           <input type="password" id="set-token" placeholder="${state.settings.token || 'Enter new token...'}" class="input-full">
           <p class="field-help">Changes take effect immediately for new requests.</p>
         </div>
+        <div class="field">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text2); font-size: 13px;">
+            <input type="checkbox" id="set-direct" ${state.settings.useDirectApi ? 'checked' : ''} style="width: auto;">
+            Use Direct API (Bypass CLI, solves OOM for large content)
+          </label>
+        </div>
         <button class="btn btn-primary" onclick="saveSettings()">Save Configuration</button>
+
       </div>
     </div>
 
@@ -461,11 +468,12 @@ window.deleteModel = (i) => {
 window.saveSettings = async () => {
   const backend = $('set-backend').value;
   const token = $('set-token').value;
+  const useDirectApi = $('set-direct').checked;
 
   try {
     await api('/dashboard/api/settings', {
       method: 'POST',
-      body: JSON.stringify({ backend, token, models: state.settings.models })
+      body: JSON.stringify({ backend, token, useDirectApi, models: state.settings.models })
     });
     showToast('Settings saved successfully');
     // Refresh global model list
