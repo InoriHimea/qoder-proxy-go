@@ -67,9 +67,13 @@ While you *can* use environment variables, it is highly recommended to configure
 ### OpenAI Compatible
 - **`GET /v1/models`**: List all available models (from your dynamic configuration).
 - **`POST /v1/chat/completions`**: Standard chat completions endpoint. Supports `stream: true`.
+- **`POST /v/chat`**: Alias for chat completions.
+- **`POST /responses`**: Codex-style completion endpoint.
+- **`POST /v1/responses`**: Alias for Codex-style completions.
 
 ### Anthropic Compatible
 - **`POST /v1/messages`**: Claude-compatible messages endpoint. Supports `stream: true`.
+- **`POST /v1/message`**: Alias for messages endpoint.
 
 ### Utility & Dashboard
 - **`GET /health`**: Returns HTTP 200 OK if the server is running.
