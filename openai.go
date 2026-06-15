@@ -227,7 +227,12 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 					if content := extractContentText(msg["content"]); content != "" {
 						contentBuilder.WriteString(content)
 					}
+				} else if line["type"] == "result" && line["subtype"] == "success" {
+					if res, ok := line["result"].(string); ok && res != "" {
+						contentBuilder.WriteString(res)
+					}
 				} else {
+
 					// Check for explicit error in result
 					if isErr, _ := line["is_error"].(bool); isErr {
 						if res, ok := line["result"].(string); ok {

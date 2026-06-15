@@ -53,8 +53,13 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 
 	err := fasthttp.Do(hReq, hResp)
 	if err != nil {
+		AddSystemLog(fmt.Sprintf("Direct API call failed: %v", err), "error", "direct")
 		ctx.Error(fmt.Sprintf("Direct API call failed: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	if hResp.StatusCode() >= 400 {
+		AddSystemLog(fmt.Sprintf("Direct API backend returned %d: %s", hResp.StatusCode(), string(hResp.Body())), "warn", "direct")
 	}
 
 	ctx.SetStatusCode(hResp.StatusCode())
@@ -84,8 +89,13 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 
 	hResp, err := client.Do(hReq)
 	if err != nil {
+		AddSystemLog(fmt.Sprintf("Direct Stream call failed: %v", err), "error", "direct")
 		ctx.Error(fmt.Sprintf("Direct Stream call failed: %v", err), http.StatusInternalServerError)
 		return
+	}
+	
+	if hResp.StatusCode >= 400 {
+		AddSystemLog(fmt.Sprintf("Direct Stream backend returned %d", hResp.StatusCode), "warn", "direct")
 	}
 	// We don't defer hResp.Body.Close() here because we pass it to the stream writer
 

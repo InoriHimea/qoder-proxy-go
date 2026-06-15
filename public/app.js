@@ -476,8 +476,17 @@ window.saveSettings = async () => {
       body: JSON.stringify({ backend, token, useDirectApi, models: state.settings.models })
     });
     showToast('Settings saved successfully');
+    // Update local state to keep UI in sync
+    state.settings.backend = backend;
+    state.settings.useDirectApi = useDirectApi;
+    if (token && (token !== '******' && !token.includes('...'))) {
+        state.settings.token = '******';
+        state.settings.hasToken = true;
+    }
+
     // Refresh global model list
     const mdl = await api('/dashboard/api/models');
+
     state.models = mdl.models || [];
     state.settings.token = token ? '******' : state.settings.token;
   } catch (err) { showToast(`Error saving settings: ${err.message}`, 'error'); }
