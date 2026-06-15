@@ -41,33 +41,53 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 		return
 	}
 
-	hReq := fasthttp.AcquireRequest()
-	defer fasthttp.ReleaseRequest(hReq)
-	
-	hReq.SetRequestURI(url)
-	hReq.Header.SetMethod("POST")
-	hReq.Header.SetContentType("application/json")
-	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
-	hReq.SetBody(body)
-	
-	hResp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(hResp)
+	hReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
+		return
+	}
 
-	err := fasthttp.Do(hReq, hResp)
+	hReq.Header.Set("Content-Type", "application/json")
+	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+
+	client := &http.Client{
+		Timeout: 15 * time.Minute,
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			TLSHandshakeTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: false,
+			},
+		},
+	}
+
+	hResp, err := client.Do(hReq)
 	if err != nil {
 		AddSystemLog(fmt.Sprintf("Direct API call failed: %v", err), "error", "direct")
 		ctx.Error(fmt.Sprintf("Direct API call failed: %v", err), http.StatusInternalServerError)
 		return
 	}
+	defer hResp.Body.Close()
 
-	if hResp.StatusCode() >= 400 {
-		AddSystemLog(fmt.Sprintf("Direct API backend returned %d: %s", hResp.StatusCode(), string(hResp.Body())), "warn", "direct")
+	respBody, _ := io.ReadAll(hResp.Body)
+
+	if hResp.StatusCode >= 400 {
+		AddSystemLog(fmt.Sprintf("Direct API backend returned %d: %s", hResp.StatusCode, string(respBody)), "warn", "direct")
 	}
 
-	ctx.SetStatusCode(hResp.StatusCode())
-	ctx.SetBody(hResp.Body())
+	ctx.SetStatusCode(hResp.StatusCode)
+	ctx.SetContentType(hResp.Header.Get("Content-Type"))
+	ctx.SetBody(respBody)
 	
-	um.Record(req.Model, len(messagesToPrompt(req.Messages)), len(hResp.Body()), false, time.Since(started).Milliseconds())
+	um.Record(req.Model, len(messagesToPrompt(req.Messages)), len(respBody), false, time.Since(started).Milliseconds())
 }
 
 func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body []byte, req ChatRequest, um *UsageManager, started time.Time) {
@@ -88,6 +108,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 	client := &http.Client{
 		Timeout: 15 * time.Minute,
 		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
 			TLSHandshakeTimeout: 30 * time.Second,
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
