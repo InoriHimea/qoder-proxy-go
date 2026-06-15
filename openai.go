@@ -368,58 +368,89 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
 
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
-		defer stdout.Close()
-		scanner := bufio.NewScanner(stdout)
-	        // Increase buffer size to 10MB to handle large lines
-	        buf := make([]byte, 0, 64*1024)
-	        scanner.Buffer(buf, 10*1024*1024)
+	defer stdout.Close()
+	scanner := bufio.NewScanner(stdout)
+	// Increase buffer size to 10MB to handle large lines
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
 
-	        outLen := 0
-	        for scanner.Scan() {
-	                var line map[string]interface{}
-	                if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-	                        if line["type"] == "assistant" {
-	                                if msg, ok := line["message"].(map[string]interface{}); ok {
-	                                        if content := extractContentText(msg["content"]); content != "" {
-	                                                outLen += len(content)
-	                                                chunk := ChatChunk{
-	                                                        ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-	                                                }
-	                                                chunk.Choices = []struct {
-	                                                        Index int `json:"index"`
-	                                                        Delta struct {
-	                                                                Role    string `json:"role,omitempty"`
-	                                                                Content string `json:"content,omitempty"`
-	                                                        } `json:"delta"`
-	                                                        FinishReason *string `json:"finish_reason"`
-	                                                }{
-	                                                        {
-	                                                                Index: 0,
-	                                                        },
-	                                                }
-	                                                chunk.Choices[0].Delta.Content = content
+	outLen := 0
+	var fullContent strings.Builder
+	for scanner.Scan() {
+		var line map[string]interface{}
+		if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
+			if line["type"] == "assistant" {
+				if msg, ok := line["message"].(map[string]interface{}); ok {
+					if content := extractContentText(msg["content"]); content != "" {
+						outLen += len(content)
+						fullContent.WriteString(content)
+						chunk := ChatChunk{
+							ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+						}
+						chunk.Choices = []struct {
+							Index int `json:"index"`
+							Delta struct {
+								Role    string `json:"role,omitempty"`
+								Content string `json:"content,omitempty"`
+							} `json:"delta"`
+							FinishReason *string `json:"finish_reason"`
+						}{
+							{
+								Index: 0,
+							},
+						}
+						chunk.Choices[0].Delta.Content = content
 
-	                                                data, _ := json.Marshal(chunk)
-	                                                fmt.Fprintf(w, "data: %s\n\n", data)
-	                                                w.Flush()
-	                                        }
-	                                }
-	                        }
-	                }
-	        }
+						data, _ := json.Marshal(chunk)
+						fmt.Fprintf(w, "data: %s\n\n", data)
+						w.Flush()
+					}
+				}
+			} else if line["type"] == "result" && line["subtype"] == "success" {
+				if res, ok := line["result"].(string); ok && res != "" {
+					outLen += len(res)
+					fullContent.WriteString(res)
+					chunk := ChatChunk{
+						ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+					}
+					chunk.Choices = []struct {
+						Index int `json:"index"`
+						Delta struct {
+							Role    string `json:"role,omitempty"`
+							Content string `json:"content,omitempty"`
+						} `json:"delta"`
+						FinishReason *string `json:"finish_reason"`
+					}{
+						{
+							Index: 0,
+						},
+					}
+					chunk.Choices[0].Delta.Content = res
 
-	        if err := scanner.Err(); err != nil {
-	                AddSystemLog(fmt.Sprintf("Scanner error in chat stream: %v", err), "error", "cli")
-	                // If it's a buffer too long error, we should definitely know
-	                if err == bufio.ErrTooLong {
-	                        AddSystemLog("Line too long for scanner buffer (10MB)", "error", "cli")
-	                }
-	        }
+					data, _ := json.Marshal(chunk)
+					fmt.Fprintf(w, "data: %s\n\n", data)
+					w.Flush()
+				}
+			}
+		}
+	}
 
-	        fmt.Fprintf(w, "data: [DONE]\n\n")
-	        w.Flush()
+	if err := scanner.Err(); err != nil {
+		AddSystemLog(fmt.Sprintf("Scanner error in chat stream: %v", err), "error", "cli")
+		// If it's a buffer too long error, we should definitely know
+		if err == bufio.ErrTooLong {
+			AddSystemLog("Line too long for scanner buffer (10MB)", "error", "cli")
+		}
+	}
 
-	        um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	w.Flush()
+
+	if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+		UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
+	}
+
+	um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
 	})
 
 }

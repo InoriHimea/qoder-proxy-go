@@ -29,6 +29,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize usage manager: %v", err)
 	}
+	
+	logDBPath := getEnv("LOG_DB_PATH", "data/logs.db")
+	if err := InitLogDB(logDBPath); err != nil {
+		log.Printf("Failed to initialize log database: %v", err)
+	}
 
 	dc := NewDirectClient(cm)
 
@@ -37,7 +42,7 @@ func main() {
 	// ── Public Routes ────────────────────────────────────────────────────────────
 	r.GET("/", func(ctx *fasthttp.RequestCtx) {
 		ctx.SetContentType("application/json")
-		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.3","dashboard":"/dashboard/"}`)
+		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.4","dashboard":"/dashboard/"}`)
 	})
 
 	r.GET("/health", func(ctx *fasthttp.RequestCtx) {
@@ -158,25 +163,31 @@ func main() {
 			}
 		}
 
-		r.Handler(ctx)
-		
 		isChatPath := path == "/v1/chat/completions" || path == "/v/chat" || path == "/responses" || path == "/v1/responses"
 		isMsgPath := path == "/v1/messages" || path == "/v1/message"
+
+		logID := ""
+		if isChatPath || isMsgPath {
+			logID = fmt.Sprintf("log_%d", time.Now().UnixNano())
+			ctx.SetUserValue("log_id", logID)
+		}
+
+		r.Handler(ctx)
 
 		if isChatPath || isMsgPath {
 			var bodyObj map[string]interface{}
 			json.Unmarshal(ctx.PostBody(), &bodyObj)
-			
+
 			isSSE := false
 			if streamVal, ok := bodyObj["stream"].(bool); ok {
 				isSSE = streamVal
 			}
 
 			respBody := ctx.UserValue("response_body")
-			
-			AddRequestLog(string(ctx.Method()), path, ctx.Response.StatusCode(), isSSE, bodyObj, respBody)
+
+			AddRequestLogWithID(logID, string(ctx.Method()), path, ctx.Response.StatusCode(), isSSE, bodyObj, respBody)
 		}
-	}
+		}
 
 	fmt.Printf("🚀 Qoder Go Proxy starting on :%s\n", port)
 	AddSystemLog("Qoder Proxy starting...", "info", "system")

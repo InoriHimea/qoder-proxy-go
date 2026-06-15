@@ -339,10 +339,16 @@ function renderMessages() {
     area.innerHTML = '<div class="chat-empty"><p>Select a model and start a conversation.</p></div>';
     return;
   }
-  area.innerHTML = state.chat.messages.map(m => `
+  area.innerHTML = state.chat.messages.map(m => {
+    let contentHtml = m.role === 'assistant' ? mdToHtml(m.content) : escHtml(m.content);
+    if (m.role === 'assistant' && state.chat.streaming && m.content === '') {
+      contentHtml = `<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>`;
+    }
+    return `
     <div class="msg msg-${m.role}">
-      <div class="msg-bubble">${m.role === 'assistant' ? mdToHtml(m.content) : escHtml(m.content)}</div>
-    </div>`).join('');
+      <div class="msg-bubble" style="${contentHtml.includes('typing-indicator') ? 'background:transparent;border:none;padding:0' : ''}">${contentHtml}</div>
+    </div>`;
+  }).join('');
   area.scrollTop = area.scrollHeight;
 }
 
@@ -498,12 +504,19 @@ function renderLogs() {
     <div class="page-header">
       <div><h1 class="page-title">Request Logs</h1><p class="page-sub">Recent traffic through the proxy</p></div>
       <div class="logs-toolbar-right">
+        <button id="ar-req-btn" class="auto-refresh-toggle ${state.logs.autoRefresh ? 'on' : ''}" onclick="toggleAutoRefresh('req')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Auto Refresh
+        </button>
         <button class="btn btn-ghost btn-sm" onclick="fetchLogs()">Refresh</button>
         <button class="btn btn-danger btn-sm" onclick="clearLogs()">Clear</button>
       </div>
     </div>
     <div id="log-list" class="table-wrap">Loading...</div>`;
   fetchLogs();
+  if (state.logs.autoRefresh && !state.logs.timer) {
+    state.logs.timer = setInterval(fetchLogs, 3000);
+  }
 }
 
 async function fetchLogs() {
@@ -585,14 +598,37 @@ window.clearLogs = async () => {
   fetchLogs();
 };
 
+window.toggleAutoRefresh = (type) => {
+  if (type === 'req') {
+    state.logs.autoRefresh = !state.logs.autoRefresh;
+    $('ar-req-btn').classList.toggle('on', state.logs.autoRefresh);
+    if (state.logs.autoRefresh) state.logs.timer = setInterval(fetchLogs, 3000);
+    else clearInterval(state.logs.timer);
+  } else {
+    state.sysLogs.autoRefresh = !state.sysLogs.autoRefresh;
+    $('ar-sys-btn').classList.toggle('on', state.sysLogs.autoRefresh);
+    if (state.sysLogs.autoRefresh) state.sysLogs.timer = setInterval(fetchSystemLogs, 3000);
+    else clearInterval(state.sysLogs.timer);
+  }
+};
+
 function renderSystemLogs() {
   $('content').innerHTML = `
     <div class="page-header">
       <div><h1 class="page-title">System Logs</h1><p class="page-sub">Runtime events and process output</p></div>
-      <button class="btn btn-ghost btn-sm" onclick="fetchSystemLogs()">Refresh</button>
+      <div class="logs-toolbar-right">
+        <button id="ar-sys-btn" class="auto-refresh-toggle ${state.sysLogs.autoRefresh ? 'on' : ''}" onclick="toggleAutoRefresh('sys')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Auto Refresh
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="fetchSystemLogs()">Refresh</button>
+      </div>
     </div>
     <div id="sys-list" class="terminal">Loading...</div>`;
   fetchSystemLogs();
+  if (state.sysLogs.autoRefresh && !state.sysLogs.timer) {
+    state.sysLogs.timer = setInterval(fetchSystemLogs, 3000);
+  }
 }
 
 async function fetchSystemLogs() {

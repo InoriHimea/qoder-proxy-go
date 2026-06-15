@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -85,6 +87,20 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 
 	client := &http.Client{
 		Timeout: 15 * time.Minute,
+		Transport: &http.Transport{
+			TLSHandshakeTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: false,
+			},
+		},
 	}
 
 	hResp, err := client.Do(hReq)
@@ -108,6 +124,8 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
 		defer hResp.Body.Close()
 		
+		var fullContent strings.Builder
+
 		// Use a buffer to read from the stream and write to the client
 		buf := make([]byte, 4096)
 		outLen := 0
@@ -120,6 +138,25 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 					break // Client disconnected
 				}
 				w.Flush()
+				
+				// Try to extract content chunks for logging
+				lines := strings.Split(string(buf[:n]), "\n")
+				for _, line := range lines {
+					if strings.HasPrefix(line, "data: ") && line != "data: [DONE]" {
+						var chunk struct {
+							Choices []struct {
+								Delta struct {
+									Content string `json:"content"`
+								} `json:"delta"`
+							} `json:"choices"`
+						}
+						if err := json.Unmarshal([]byte(line[6:]), &chunk); err == nil {
+							if len(chunk.Choices) > 0 {
+								fullContent.WriteString(chunk.Choices[0].Delta.Content)
+							}
+						}
+					}
+				}
 			}
 			if err != nil {
 				if err != io.EOF {
@@ -128,6 +165,12 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 				break
 			}
 		}
+		
+		// If we are tracking request logs for this request, update it with the full content
+		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+			UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
+		}
+		
 		um.Record(req.Model, len(messagesToPrompt(req.Messages)), outLen/50, false, time.Since(started).Milliseconds())
 	})
 }

@@ -77,7 +77,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 		"memoryMB":   fmt.Sprintf("%.1f", float64(m.Alloc)/1024/1024),
 		"heapUsedMB": fmt.Sprintf("%.1f", float64(m.HeapAlloc)/1024/1024),
 		"timestamp":  time.Now().Format(time.RFC3339),
-		"version":    "3.2.3-go",
+		"version":    "3.2.4-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }
@@ -85,7 +85,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 func handleConfig(ctx *fasthttp.RequestCtx) {
 	resp := map[string]interface{}{
 		"publicBaseUrl": fmt.Sprintf("http://%s", ctx.Host()),
-		"version":    "3.2.3-go",
+		"version":    "3.2.4-go",
 
 	}
 	json.NewEncoder(ctx).Encode(resp)
