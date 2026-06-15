@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -38,15 +40,16 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	hReq.Header.SetMethod("POST")
 	hReq.Header.SetContentType("application/json")
 	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	hReq.Header.Set("Accept", "text/event-stream")
 	hReq.SetBody(body)
-	
-	hResp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(hResp)
 	
 	if req.Stream {
 		c.handleStream(ctx, hReq, req, um, started)
 		return
 	}
+
+	hResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(hResp)
 
 	err := fasthttp.Do(hReq, hResp)
 	if err != nil {
@@ -62,16 +65,50 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 }
 
 func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, hReq *fasthttp.Request, req ChatRequest, um *UsageManager, started time.Time) {
+	// For streaming, we use a client that won't buffer the response
+	client := &fasthttp.Client{
+		ReadTimeout:  10 * time.Minute,
+		WriteTimeout: 10 * time.Minute,
+	}
+
+	hResp := fasthttp.AcquireResponse()
+	// No defer ReleaseResponse here because we'll handle it or it's piped
+	
+	err := client.DoStream(hReq, hResp)
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Direct Stream failed to initiate: %v", err), http.StatusInternalServerError)
+		fasthttp.ReleaseResponse(hResp)
+		return
+	}
+
 	ctx.SetContentType("text/event-stream")
 	ctx.Response.Header.Set("Cache-Control", "no-cache")
 	ctx.Response.Header.Set("Connection", "keep-alive")
 	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
+	ctx.SetStatusCode(hResp.StatusCode())
 
-	err := fasthttp.Do(hReq, &ctx.Response)
-	if err != nil {
-		AddSystemLog(fmt.Sprintf("Direct Stream failed: %v", err), "error", "direct")
-	}
-	
-	// Note: fasthttp.Do with ctx.Response will handle the streaming if the backend sends it correctly.
-	// But we might want to intercept it to record usage.
+	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer fasthttp.ReleaseResponse(hResp)
+		reader := hResp.BodyStream()
+		if reader == nil {
+			return
+		}
+		
+		// Copy chunks from upstream to client
+		// Using a small buffer for minimal latency
+		buf := make([]byte, 4096)
+		outLen := 0
+		for {
+			n, err := reader.Read(buf)
+			if n > 0 {
+				outLen += n
+				w.Write(buf[:n])
+				w.Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+		um.Record(req.Model, len(messagesToPrompt(req.Messages)), outLen/50, false, time.Since(started).Milliseconds())
+	})
 }

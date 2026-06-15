@@ -101,11 +101,11 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		um.Record(req.Model, len(prompt), 0, true, time.Since(started).Milliseconds())
 		return
 	}
-	defer stdout.Close()
 
 	id := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
 	if !req.Stream {
+		defer stdout.Close()
 		scanner := bufio.NewScanner(stdout)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 10*1024*1024)
@@ -140,6 +140,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 	ctx.Response.Header.Set("Connection", "keep-alive")
 
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer stdout.Close()
 		writeEvent := func(eventType string, data interface{}) {
 			d, _ := json.Marshal(data)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, d)
@@ -352,7 +353,6 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		um.Record(req.Model, len(prompt), 0, true, time.Since(started).Milliseconds())
 		return
 	}
-	defer stdout.Close()
 
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	created := time.Now().Unix()
@@ -363,7 +363,8 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
 
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
-	        scanner := bufio.NewScanner(stdout)
+		defer stdout.Close()
+		scanner := bufio.NewScanner(stdout)
 	        // Increase buffer size to 10MB to handle large lines
 	        buf := make([]byte, 0, 64*1024)
 	        scanner.Buffer(buf, 10*1024*1024)
