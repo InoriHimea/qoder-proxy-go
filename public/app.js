@@ -422,7 +422,7 @@ function renderSettings() {
         </div>
         <div class="field" style="margin-top: 10px;">
           <label>Proxy URL (Optional, for Direct API)</label>
-          <input type="text" id="set-proxyUrl" placeholder="http://127.0.0.1:7890" value="${escapeHtml(state.settings.proxyUrl || '')}">
+          <input type="text" id="set-proxyUrl" placeholder="http://127.0.0.1:7890" value="${escHtml(state.settings.proxyUrl || '')}">
           <div style="font-size: 11px; color: var(--text3); margin-top: 4px;">Use this to resolve TLS Handshake Timeouts in Direct Mode if your environment requires a specific proxy.</div>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">Save Configuration</button>
