@@ -29,7 +29,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize usage manager: %v", err)
 	}
-	
+
 	logDBPath := getEnv("LOG_DB_PATH", "data/logs.db")
 	if err := InitLogDB(logDBPath); err != nil {
 		log.Printf("Failed to initialize log database: %v", err)
@@ -42,7 +42,7 @@ func main() {
 	// ── Public Routes ────────────────────────────────────────────────────────────
 	r.GET("/", func(ctx *fasthttp.RequestCtx) {
 		ctx.SetContentType("application/json")
-		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.7","dashboard":"/dashboard/"}`)
+		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.8","dashboard":"/dashboard/"}`)
 	})
 
 	r.GET("/health", func(ctx *fasthttp.RequestCtx) {
@@ -151,7 +151,7 @@ func main() {
 		isDashboard := strings.HasPrefix(path, "/dashboard")
 		isLogin := path == "/dashboard/login"
 		isStatic := strings.HasPrefix(path, "/dashboard/static/")
-		
+
 		if isDashboard && !isLogin && !isStatic {
 			expectedPwd := getEnv("DASHBOARD_PASSWORD", "")
 			if expectedPwd != "" {
@@ -187,7 +187,7 @@ func main() {
 
 			AddRequestLogWithID(logID, string(ctx.Method()), path, ctx.Response.StatusCode(), isSSE, bodyObj, respBody)
 		}
-		}
+	}
 
 	fmt.Printf("🚀 Qoder Go Proxy starting on :%s\n", port)
 	AddSystemLog("Qoder Proxy starting...", "info", "system")

@@ -9,9 +9,9 @@ import (
 )
 
 type ToolCall struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"`
-	Function  ToolCallFunction       `json:"function"`
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
 }
 
 type ToolCallFunction struct {
@@ -48,10 +48,10 @@ func parseToolCallOutput(text string) *ParsedToolOutput {
 		if len(match) < 2 {
 			continue
 		}
-		
+
 		toolJson := strings.TrimSpace(match[1])
 		var toolData map[string]interface{}
-		
+
 		if err := json.Unmarshal([]byte(toolJson), &toolData); err != nil {
 			// Try to recover basic action
 			if strings.Contains(toolJson, `"action":`) {
@@ -63,7 +63,7 @@ func parseToolCallOutput(text string) *ParsedToolOutput {
 		if name == "" {
 			name = "unknown_tool"
 		}
-		
+
 		argsStr := "{}"
 		if argsMap, ok := toolData["args"].(map[string]interface{}); ok {
 			b, _ := json.Marshal(argsMap)
@@ -97,8 +97,8 @@ func executeToolCall(call ToolCall) interface{} {
 	// Dummy execution layer - in reality this would execute local commands.
 	// For proxying, we just log it and return a mocked response indicating proxy completion
 	return map[string]interface{}{
-		"status": "success",
+		"status":  "success",
 		"message": fmt.Sprintf("Proxy executed tool %s successfully (mocked)", call.Function.Name),
-		"output": "Command executed.",
+		"output":  "Command executed.",
 	}
 }

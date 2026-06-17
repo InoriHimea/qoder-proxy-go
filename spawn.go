@@ -15,11 +15,13 @@ type SpawnOptions struct {
 	Model           string
 	ReasoningEffort string
 	MaxTokens       int
+	SystemPrompt    string
+	DisableTools    bool
 }
 
 func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *ConfigManager) (io.ReadCloser, error) {
 	config := cm.Get()
-	
+
 	binaryName := "qodercli"
 	if strings.ToLower(config.Backend) == "cn" {
 		binaryName = "qoderclicn"
@@ -36,6 +38,12 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	if opts.MaxTokens > 0 {
 		args = append(args, "--max-output-tokens", fmt.Sprintf("%d", opts.MaxTokens))
 	}
+	if opts.SystemPrompt != "" {
+		args = append(args, "--system-prompt", opts.SystemPrompt)
+	}
+	if opts.DisableTools {
+		args = append(args, "--tools", "")
+	}
 
 	cmdPath := binaryName
 	if runtime.GOOS == "windows" {
@@ -48,7 +56,8 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	}
 
 	cmd := exec.CommandContext(ctx, cmdPath, args...)
-	
+	cmd.Dir = os.TempDir() // Prevent locking into /app directory
+
 	// Set environment
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_API_KEY=%s", config.Token))
@@ -57,7 +66,7 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	cmd.Env = append(cmd.Env, "NO_BROWSER=1", "CI=1")
 	cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=8192")
 	// Some Node.js optimizations for large heap
-	cmd.Env = append(cmd.Env, "V8_FORCE_GC=1") 
+	cmd.Env = append(cmd.Env, "V8_FORCE_GC=1")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

@@ -5,7 +5,7 @@ import (
 )
 
 var (
-	qoderTokenRegex = regexp.MustCompile(`sk-[a-zA-Z0-9_-]{32,}`)
+	qoderTokenRegex     = regexp.MustCompile(`sk-[a-zA-Z0-9_-]{32,}`)
 	anthropicTokenRegex = regexp.MustCompile(`sk-ant-[a-zA-Z0-9_-]+`)
 )
 

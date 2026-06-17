@@ -63,7 +63,7 @@ func InitLogDB(path string) error {
 	}
 
 	logDB = db
-	
+
 	// Start cleanup goroutine
 	go func() {
 		for {
@@ -71,7 +71,7 @@ func InitLogDB(path string) error {
 			time.Sleep(24 * time.Hour)
 		}
 	}()
-	
+
 	return nil
 }
 
@@ -154,7 +154,7 @@ func handleGetRequestLogDetail(ctx *fasthttp.RequestCtx) {
 	var bodyStr, respStr string
 	err := logDB.QueryRow("SELECT id, timestamp, method, path, status_code, is_sse, body, response_body FROM request_logs WHERE id = ?", id).
 		Scan(&l.ID, &l.Timestamp, &l.Method, &l.Path, &l.StatusCode, &l.IsSSE, &bodyStr, &respStr)
-	
+
 	if err != nil {
 		ctx.SetStatusCode(404)
 		return

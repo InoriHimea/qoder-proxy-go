@@ -13,7 +13,7 @@ import (
 
 func handleGetSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 	cfg := cm.Get()
-	
+
 	maskedToken := ""
 	if cfg.Token != "" {
 		if len(cfg.Token) > 8 {
@@ -28,6 +28,7 @@ func handleGetSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 		"token":        maskedToken,
 		"hasToken":     cfg.Token != "",
 		"useDirectApi": cfg.UseDirectAPI,
+		"proxyUrl":     cfg.ProxyURL,
 		"models":       cfg.Models,
 	}
 	json.NewEncoder(ctx).Encode(resp)
@@ -38,6 +39,7 @@ func handlePostSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 		Backend      string  `json:"backend"`
 		Token        string  `json:"token"`
 		UseDirectApi bool    `json:"useDirectApi"`
+		ProxyUrl     string  `json:"proxyUrl"`
 		Models       []Model `json:"models"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &input); err != nil {
@@ -50,6 +52,7 @@ func handlePostSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 		Backend:      input.Backend,
 		Token:        input.Token,
 		UseDirectAPI: input.UseDirectApi,
+		ProxyURL:     input.ProxyUrl,
 		Models:       input.Models,
 	}
 
@@ -85,8 +88,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 func handleConfig(ctx *fasthttp.RequestCtx) {
 	resp := map[string]interface{}{
 		"publicBaseUrl": fmt.Sprintf("http://%s", ctx.Host()),
-		"version":    "3.2.7-go",
-
+		"version":       "3.2.8-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }

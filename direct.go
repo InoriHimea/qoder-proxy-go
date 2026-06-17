@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,22 +27,22 @@ func NewDirectClient(cm *ConfigManager) *DirectClient {
 func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) {
 	started := time.Now()
 	cfg := c.Config.Get()
-	
+
 	baseURL := "https://openapi.qoder.sh/api/v1"
 	if strings.ToLower(cfg.Backend) == "cn" {
-		baseURL = "https://openapi.qoderwork.cn/api/v1"
+		baseURL = "https://openapi.qoder.com.cn/api/v1"
 	}
 
-	url := baseURL + "/chat/completions"
-	
+	reqURL := baseURL + "/chat/completions"
+
 	body, _ := json.Marshal(req)
-	
+
 	if req.Stream {
-		c.handleStream(ctx, url, body, req, um, started)
+		c.handleStream(ctx, reqURL, body, req, um, started)
 		return
 	}
 
-	hReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	hReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		ctx.Error(fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
 		return
@@ -50,10 +51,19 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	hReq.Header.Set("Content-Type", "application/json")
 	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
 
+	proxyFunc := http.ProxyFromEnvironment
+	if cfg.ProxyURL != "" {
+		if pURL, err := url.Parse(cfg.ProxyURL); err == nil {
+			proxyFunc = http.ProxyURL(pURL)
+		} else {
+			AddSystemLog(fmt.Sprintf("Invalid custom ProxyURL '%s': %v. Falling back to env.", cfg.ProxyURL, err), "warn", "direct")
+		}
+	}
+
 	client := &http.Client{
 		Timeout: 15 * time.Minute,
 		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
+			Proxy:               proxyFunc,
 			TLSHandshakeTimeout: 30 * time.Second,
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
@@ -86,29 +96,39 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	ctx.SetStatusCode(hResp.StatusCode)
 	ctx.SetContentType(hResp.Header.Get("Content-Type"))
 	ctx.SetBody(respBody)
-	
-	um.Record(req.Model, len(messagesToPrompt(req.Messages)), len(respBody), false, time.Since(started).Milliseconds())
+
+	sys, prompt := extractSystemAndPrompt(req.Messages)
+	um.Record(req.Model, len(sys)+len(prompt), len(respBody), false, time.Since(started).Milliseconds())
 }
 
-func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body []byte, req ChatRequest, um *UsageManager, started time.Time) {
+func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, body []byte, req ChatRequest, um *UsageManager, started time.Time) {
 	cfg := c.Config.Get()
-	
-	hReq, err := http.NewRequest("POST", url, bytes.NewReader(body))
+
+	hReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		ctx.Error(fmt.Sprintf("Failed to create stream request: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	hReq.Header.Set("Content-Type", "application/json")
 	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
 	hReq.Header.Set("Accept", "text/event-stream")
 	hReq.Header.Set("Cache-Control", "no-cache")
 	hReq.Header.Set("Connection", "keep-alive")
 
+	proxyFunc := http.ProxyFromEnvironment
+	if cfg.ProxyURL != "" {
+		if pURL, err := url.Parse(cfg.ProxyURL); err == nil {
+			proxyFunc = http.ProxyURL(pURL)
+		} else {
+			AddSystemLog(fmt.Sprintf("Invalid custom ProxyURL '%s': %v. Falling back to env.", cfg.ProxyURL, err), "warn", "direct")
+		}
+	}
+
 	client := &http.Client{
 		Timeout: 15 * time.Minute,
 		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
+			Proxy:               proxyFunc,
 			TLSHandshakeTimeout: 30 * time.Second,
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
@@ -130,7 +150,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 		ctx.Error(fmt.Sprintf("Direct Stream call failed: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	if hResp.StatusCode >= 400 {
 		AddSystemLog(fmt.Sprintf("Direct Stream backend returned %d", hResp.StatusCode), "warn", "direct")
 	}
@@ -144,7 +164,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 
 	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
 		defer hResp.Body.Close()
-		
+
 		var fullContent strings.Builder
 
 		// Use a buffer to read from the stream and write to the client
@@ -159,7 +179,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 					break // Client disconnected
 				}
 				w.Flush()
-				
+
 				// Try to extract content chunks for logging
 				lines := strings.Split(string(buf[:n]), "\n")
 				for _, line := range lines {
@@ -186,12 +206,13 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, url string, body [
 				break
 			}
 		}
-		
+
 		// If we are tracking request logs for this request, update it with the full content
 		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
 			UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
 		}
-		
-		um.Record(req.Model, len(messagesToPrompt(req.Messages)), outLen/50, false, time.Since(started).Milliseconds())
+
+		sys, prompt := extractSystemAndPrompt(req.Messages)
+		um.Record(req.Model, len(sys)+len(prompt), outLen/50, false, time.Since(started).Milliseconds())
 	})
 }

@@ -63,9 +63,6 @@ type AnthropicEventDelta struct {
 // Conversion Helpers
 func anthropicMessagesToPrompt(req AnthropicRequest) string {
 	var sb strings.Builder
-	if req.System != "" {
-		sb.WriteString(fmt.Sprintf("System: %s\n\n", req.System))
-	}
 
 	for _, m := range req.Messages {
 		content := ""

@@ -417,8 +417,13 @@ function renderSettings() {
         <div class="field">
           <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text2); font-size: 13px;">
             <input type="checkbox" id="set-direct" ${state.settings.useDirectApi ? 'checked' : ''} style="width: auto;">
-            Use Direct API (Bypass CLI, solves OOM for large content)
+            Use Direct API (Bypass CLI, required for Claude Code local tools)
           </label>
+        </div>
+        <div class="field" style="margin-top: 10px;">
+          <label>Proxy URL (Optional, for Direct API)</label>
+          <input type="text" id="set-proxyUrl" placeholder="http://127.0.0.1:7890" value="${escapeHtml(state.settings.proxyUrl || '')}">
+          <div style="font-size: 11px; color: var(--text3); margin-top: 4px;">Use this to resolve TLS Handshake Timeouts in Direct Mode if your environment requires a specific proxy.</div>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">Save Configuration</button>
 
@@ -475,16 +480,18 @@ window.saveSettings = async () => {
   const backend = $('set-backend').value;
   const token = $('set-token').value;
   const useDirectApi = $('set-direct').checked;
+  const proxyUrl = $('set-proxyUrl').value;
 
   try {
     await api('/dashboard/api/settings', {
       method: 'POST',
-      body: JSON.stringify({ backend, token, useDirectApi, models: state.settings.models })
+      body: JSON.stringify({ backend, token, useDirectApi, proxyUrl, models: state.settings.models })
     });
     showToast('Settings saved successfully');
     // Update local state to keep UI in sync
     state.settings.backend = backend;
     state.settings.useDirectApi = useDirectApi;
+    state.settings.proxyUrl = proxyUrl;
     if (token && (token !== '******' && !token.includes('...'))) {
         state.settings.token = '******';
         state.settings.hasToken = true;
