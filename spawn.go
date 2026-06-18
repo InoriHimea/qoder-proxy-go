@@ -60,9 +60,11 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 
 	// Set environment
 	cmd.Env = os.Environ()
-	cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_API_KEY=%s", config.Token))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_PERSONAL_ACCESS_TOKEN=%s", config.Token))
-	cmd.Env = append(cmd.Env, fmt.Sprintf("QODERCN_PERSONAL_ACCESS_TOKEN=%s", config.Token))
+	if config.Token != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_API_KEY=%s", config.Token))
+		cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_PERSONAL_ACCESS_TOKEN=%s", config.Token))
+		cmd.Env = append(cmd.Env, fmt.Sprintf("QODERCN_PERSONAL_ACCESS_TOKEN=%s", config.Token))
+	}
 	cmd.Env = append(cmd.Env, "NO_BROWSER=1", "CI=1")
 	cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=8192")
 	// Some Node.js optimizations for large heap

@@ -558,7 +558,7 @@ async function fetchLogs() {
               <td><span class="status-chip ${l.statusCode < 400 ? 's2xx' : l.statusCode < 500 ? 's4xx' : 's5xx'}">${l.statusCode}</span></td>
               <td>${l.is_sse ? '<span class="stream-chip">SSE</span>' : '—'}</td>
             </tr>
-          `).reverse().join('')}
+          `).join('')}
         </tbody>
       </table>`;
   } catch (err) { showToast('Failed to fetch logs', 'error'); }
@@ -654,10 +654,8 @@ async function fetchSystemLogs() {
 }
 
 init();
-stemLogs = async () => {
+window.clearSystemLogs = async () => {
   if (!confirm('Clear all system logs?')) return;
   await api('/dashboard/api/logs/system', { method: 'DELETE' });
   fetchSystemLogs();
 };
-
-init();

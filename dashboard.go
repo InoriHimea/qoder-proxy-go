@@ -80,7 +80,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 		"memoryMB":   fmt.Sprintf("%.1f", float64(m.Alloc)/1024/1024),
 		"heapUsedMB": fmt.Sprintf("%.1f", float64(m.HeapAlloc)/1024/1024),
 		"timestamp":  time.Now().Format(time.RFC3339),
-		"version":    "3.2.13-go",
+		"version":    "3.2.14-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }
