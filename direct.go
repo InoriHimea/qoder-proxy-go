@@ -74,7 +74,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 			IdleConnTimeout:       90 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: false,
+				InsecureSkipVerify: true,
 			},
 		},
 	}
@@ -139,7 +139,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 			IdleConnTimeout:       90 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: false,
+				InsecureSkipVerify: true,
 			},
 		},
 	}

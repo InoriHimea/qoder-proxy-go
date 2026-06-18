@@ -88,7 +88,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 func handleConfig(ctx *fasthttp.RequestCtx) {
 	resp := map[string]interface{}{
 		"publicBaseUrl": fmt.Sprintf("http://%s", ctx.Host()),
-		"version":       "3.2.8-go",
+		"version":    "3.2.10-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }
@@ -100,4 +100,6 @@ func handleUsageLocal(ctx *fasthttp.RequestCtx, um *UsageManager) {
 func handleUsageReset(ctx *fasthttp.RequestCtx, um *UsageManager) {
 	um.Reset()
 	json.NewEncoder(ctx).Encode(map[string]bool{"ok": true})
+}
+
 }
