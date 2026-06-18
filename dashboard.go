@@ -88,7 +88,7 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 func handleConfig(ctx *fasthttp.RequestCtx) {
 	resp := map[string]interface{}{
 		"publicBaseUrl": fmt.Sprintf("http://%s", ctx.Host()),
-		"version":    "3.2.10-go",
+		"version":    "3.2.12-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)
 }
