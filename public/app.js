@@ -629,6 +629,7 @@ function renderSystemLogs() {
           Auto Refresh
         </button>
         <button class="btn btn-ghost btn-sm" onclick="fetchSystemLogs()">Refresh</button>
+        <button class="btn btn-danger btn-sm" onclick="clearSystemLogs()">Clear</button>
       </div>
     </div>
     <div id="sys-list" class="terminal">Loading...</div>`;
@@ -651,5 +652,12 @@ async function fetchSystemLogs() {
       </div>`).reverse().join('');
   } catch (err) { showToast('Failed to fetch system logs', 'error'); }
 }
+
+init();
+stemLogs = async () => {
+  if (!confirm('Clear all system logs?')) return;
+  await api('/dashboard/api/logs/system', { method: 'DELETE' });
+  fetchSystemLogs();
+};
 
 init();
