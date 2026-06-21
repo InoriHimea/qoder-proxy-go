@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -23,8 +24,38 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	config := cm.Get()
 
 	binaryName := "qodercli"
+	backendName := "global"
 	if strings.ToLower(config.Backend) == "cn" {
 		binaryName = "qoderclicn"
+		backendName = "cn"
+	}
+
+	if strings.HasPrefix(config.Token, "dt-") {
+		// Look for write_token.mjs
+		scriptPath := "write_token.mjs"
+		if execPath, err := os.Executable(); err == nil {
+			execDir := filepath.Dir(execPath)
+			p := filepath.Join(execDir, "write_token.mjs")
+			if _, err := os.Stat(p); err == nil {
+				scriptPath = p
+			} else {
+				// Try current working directory as fallback
+				if cwd, err := os.Getwd(); err == nil {
+					p = filepath.Join(cwd, "write_token.mjs")
+					if _, err := os.Stat(p); err == nil {
+						scriptPath = p
+					}
+				}
+			}
+		}
+
+		AddSystemLog(fmt.Sprintf("Device token detected. Writing to local storage via %s...", scriptPath), "info", "spawn")
+		writeCmd := exec.Command("node", scriptPath, backendName, config.Token)
+		if output, err := writeCmd.CombinedOutput(); err != nil {
+			AddSystemLog(fmt.Sprintf("Failed to write device token to local storage: %v. Output: %s", err, string(output)), "error", "spawn")
+		} else {
+			AddSystemLog("Device token successfully written to local storage", "info", "spawn")
+		}
 	}
 
 	// Prepare arguments. Note: we must include `--` so qodercli knows the prompt comes from stdin.
@@ -62,8 +93,10 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	cmd.Env = os.Environ()
 	if config.Token != "" {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_API_KEY=%s", config.Token))
-		cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_PERSONAL_ACCESS_TOKEN=%s", config.Token))
-		cmd.Env = append(cmd.Env, fmt.Sprintf("QODERCN_PERSONAL_ACCESS_TOKEN=%s", config.Token))
+		if !strings.HasPrefix(config.Token, "dt-") {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_PERSONAL_ACCESS_TOKEN=%s", config.Token))
+			cmd.Env = append(cmd.Env, fmt.Sprintf("QODERCN_PERSONAL_ACCESS_TOKEN=%s", config.Token))
+		}
 	}
 	cmd.Env = append(cmd.Env, "NO_BROWSER=1", "CI=1")
 	cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=8192")
