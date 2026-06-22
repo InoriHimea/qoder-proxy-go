@@ -24,7 +24,7 @@ func NewDirectClient(cm *ConfigManager) *DirectClient {
 	return &DirectClient{Config: cm}
 }
 
-func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) {
+func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) bool {
 	started := time.Now()
 	cfg := c.Config.Get()
 
@@ -38,14 +38,13 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	body, _ := json.Marshal(req)
 
 	if req.Stream {
-		c.handleStream(ctx, reqURL, body, req, um, started)
-		return
+		return c.handleStream(ctx, reqURL, body, req, um, started)
 	}
 
 	hReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		ctx.Error(fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
-		return
+		return false
 	}
 
 	hReq.Header.Set("Content-Type", "application/json")
@@ -83,9 +82,14 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	if err != nil {
 		AddSystemLog(fmt.Sprintf("Direct API call failed: %v", err), "error", "direct")
 		ctx.Error(fmt.Sprintf("Direct API call failed: %v", err), http.StatusInternalServerError)
-		return
+		return false
 	}
 	defer hResp.Body.Close()
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 404 {
+		AddSystemLog(fmt.Sprintf("Direct API backend returned %d, triggering fallback to CLI mode", hResp.StatusCode), "warn", "direct")
+		return true
+	}
 
 	respBody, _ := io.ReadAll(hResp.Body)
 
@@ -99,15 +103,16 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	um.Record(req.Model, len(sys)+len(prompt), len(respBody), false, time.Since(started).Milliseconds())
+	return false
 }
 
-func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, body []byte, req ChatRequest, um *UsageManager, started time.Time) {
+func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, body []byte, req ChatRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
 
 	hReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		ctx.Error(fmt.Sprintf("Failed to create stream request: %v", err), http.StatusInternalServerError)
-		return
+		return false
 	}
 
 	hReq.Header.Set("Content-Type", "application/json")
@@ -146,9 +151,15 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 
 	hResp, err := client.Do(hReq)
 	if err != nil {
-		AddSystemLog(fmt.Sprintf("Direct Stream call failed: %v", err), "error", "direct")
-		ctx.Error(fmt.Sprintf("Direct Stream call failed: %v", err), http.StatusInternalServerError)
-		return
+		AddSystemLog(fmt.Sprintf("Failed to create stream request: %v", err), "error", "direct")
+		ctx.Error("Failed to create stream request", http.StatusInternalServerError)
+		return false
+	}
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 404 {
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("Direct Stream backend returned %d, triggering fallback to CLI mode", hResp.StatusCode), "warn", "direct")
+		return true
 	}
 
 	if hResp.StatusCode >= 400 {
@@ -215,4 +226,6 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 		sys, prompt := extractSystemAndPrompt(req.Messages)
 		um.Record(req.Model, len(sys)+len(prompt), outLen/50, false, time.Since(started).Milliseconds())
 	})
+
+	return false
 }

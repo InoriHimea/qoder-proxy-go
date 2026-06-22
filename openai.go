@@ -188,8 +188,11 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	cfg := cm.Get()
 	if cfg.UseDirectAPI {
 		AddSystemLog(fmt.Sprintf("Using Direct API for %s", req.Model), "info", "direct")
-		dc.HandleChat(ctx, req, um)
-		return
+		fallback := dc.HandleChat(ctx, req, um)
+		if !fallback {
+			return
+		}
+		AddSystemLog("Direct API returned 401/404, falling back to CLI mode automatically...", "info", "system")
 	}
 
 	if req.Stream {
