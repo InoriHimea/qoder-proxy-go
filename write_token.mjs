@@ -60,13 +60,14 @@ try {
     let code = fs.readFileSync(foundPath, 'utf8');
     
     // Remove self execution
+    const tailCode = code.substring(Math.max(0, code.length - 5000));
     const selfExecRegex = /[a-zA-Z0-9_$]+\(\),[a-zA-Z0-9_$]+\(\),[a-zA-Z0-9_$]+\(\)\.catch/g;
-    const matches = [...code.matchAll(selfExecRegex)];
+    const matches = [...tailCode.matchAll(selfExecRegex)];
     if (matches.length === 0) {
         throw new Error('Self-execution pattern not found in bundle');
     }
     const lastMatch = matches[matches.length - 1];
-    const index = lastMatch.index;
+    const index = Math.max(0, code.length - 5000) + lastMatch.index;
     const selfExecPattern = lastMatch[0];
     console.log(`Found self-execution pattern: "${selfExecPattern}" at index ${index}`);
     
@@ -78,19 +79,27 @@ try {
     }
     const wasmInitName = wasmMatches[0][1];
 
-    const credClassRegex = /([a-zA-Z0-9_$]+)\s*=\s*class\s+A\s*\{\s*static\s+async\s+save\(/g;
-    const credMatches = [...code.matchAll(credClassRegex)];
-    if (credMatches.length === 0) {
+    let credClassName = null;
+    const saveIdx = code.indexOf('static async save(');
+    if (saveIdx !== -1) {
+        const prefix = code.substring(saveIdx - 50, saveIdx);
+        const m = prefix.match(/([a-zA-Z0-9_$]+)=class [a-zA-Z0-9_$]+\{$/);
+        if (m) credClassName = m[1];
+    }
+    if (!credClassName) {
         throw new Error('Could not dynamically find Credential Storage Class');
     }
-    const credClassName = credMatches[0][1];
 
-    const pathFnRegex = /function\s+([a-zA-Z0-9_$]+)\(\)\{\s*let\s+[a-zA-Z0-9_$]+\s*=\s*[a-zA-Z0-9_$]+\(\);\s*return\s*"prod"\s*===\s*[a-zA-Z0-9_$]+\s*\?\s*[a-zA-Z0-9_$]+\.join\(\s*[a-zA-Z0-9_$]+,\s*["']user["']\)\s*:\s*[a-zA-Z0-9_$]+\.join\(\s*[a-zA-Z0-9_$]+,\s*[\`"']user\.\$\{[a-zA-Z0-9_$]+\}[\`"']\)\}/g;
-    const pathMatches = [...code.matchAll(pathFnRegex)];
-    if (pathMatches.length === 0) {
+    let pathFnName = null;
+    const userStrIdx = code.indexOf(',"user")');
+    if (userStrIdx !== -1) {
+        const prefix = code.substring(Math.max(0, userStrIdx - 150), userStrIdx);
+        const m = prefix.match(/function ([a-zA-Z0-9_$]+)\(\)\{/);
+        if (m) pathFnName = m[1];
+    }
+    if (!pathFnName) {
         throw new Error('Could not dynamically find User Path Function');
     }
-    const pathFnName = pathMatches[0][1];
 
     console.log(`Dynamic Symbols Detected: wasmInit="${wasmInitName}", credClass="${credClassName}", pathFn="${pathFnName}"`);
 

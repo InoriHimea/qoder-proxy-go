@@ -30,7 +30,7 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 		backendName = "cn"
 	}
 
-	if strings.HasPrefix(config.Token, "dt-") {
+	if config.Token != "" {
 		// Look for write_token.mjs
 		scriptPath := "write_token.mjs"
 		if execPath, err := os.Executable(); err == nil {
@@ -93,10 +93,6 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	cmd.Env = os.Environ()
 	if config.Token != "" {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_API_KEY=%s", config.Token))
-		if !strings.HasPrefix(config.Token, "dt-") {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_PERSONAL_ACCESS_TOKEN=%s", config.Token))
-			cmd.Env = append(cmd.Env, fmt.Sprintf("QODERCN_PERSONAL_ACCESS_TOKEN=%s", config.Token))
-		}
 	}
 	cmd.Env = append(cmd.Env, "NO_BROWSER=1", "CI=1")
 	cmd.Env = append(cmd.Env, "NODE_OPTIONS=--max-old-space-size=8192")
