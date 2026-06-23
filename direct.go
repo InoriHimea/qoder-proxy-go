@@ -49,6 +49,11 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 
 	hReq.Header.Set("Content-Type", "application/json")
 	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	// Simulate Qoder CLI / IDE Extension to allow Personal Access Tokens (PAT)
+	hReq.Header.Set("User-Agent", "qoder/1.0.22")
+	hReq.Header.Set("Cosy-Version", "1.0.22")
+	hReq.Header.Set("Cosy-ClientType", "5")
+	hReq.Header.Set("Cosy-MachineOS", "x86_64_win32")
 
 	proxyFunc := http.ProxyFromEnvironment
 	if cfg.ProxyURL != "" {
@@ -118,6 +123,11 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 	hReq.Header.Set("Content-Type", "application/json")
 	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
 	hReq.Header.Set("Accept", "text/event-stream")
+	// Simulate Qoder CLI / IDE Extension to allow Personal Access Tokens (PAT)
+	hReq.Header.Set("User-Agent", "qoder/1.0.22")
+	hReq.Header.Set("Cosy-Version", "1.0.22")
+	hReq.Header.Set("Cosy-ClientType", "5")
+	hReq.Header.Set("Cosy-MachineOS", "x86_64_win32")
 	hReq.Header.Set("Cache-Control", "no-cache")
 	hReq.Header.Set("Connection", "keep-alive")
 
