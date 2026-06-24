@@ -116,14 +116,47 @@ try {
     console.log('Importing temp wrapper...');
     const { HT, fc, eee } = await import(tempFileUri);
     
+    // Exchange PAT for DT if needed
+    let finalToken = token;
+    if (token.startsWith('pt-') || token.startsWith('qodercn-')) {
+        console.log('Detected Personal Access Token, exchanging for device token...');
+        const baseURL = backend === 'cn' ? 'https://openapi.qoder.com.cn/api/v1' : 'https://openapi.qoder.sh/api/v1';
+        try {
+            const res = await fetch(`${baseURL}/jobToken/exchange`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'qoder/1.0.22',
+                    'Cosy-Version': '1.0.22',
+                    'Cosy-ClientType': '5',
+                    'Cosy-MachineOS': process.platform === 'win32' ? 'x86_64_win32' : 'x86_64_linux'
+                },
+                body: JSON.stringify({ personal_token: token })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.token || data.device_token || data.access_token) {
+                    finalToken = data.token || data.device_token || data.access_token;
+                    console.log('Successfully exchanged token!');
+                } else {
+                    console.error('Failed to parse token from exchange response:', data);
+                }
+            } else {
+                console.error('Failed to exchange token. Status:', res.status, await res.text());
+            }
+        } catch (err) {
+            console.error('Error exchanging token:', err);
+        }
+    }
+
     console.log('Initializing WASM...');
     await HT();
     
     const credentials = {
         uid: "019ece1a-7036-75f3-be32-145c882786df",
         name: "qoder_user",
-        security_oauth_token: token,
-        access_token: token,
+        security_oauth_token: finalToken,
+        access_token: finalToken,
         refresh_token: "drt-dummy",
         expire_time: 2000000000,
         refresh_token_expire_time: 2000000000,
