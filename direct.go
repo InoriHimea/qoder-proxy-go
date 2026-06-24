@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -22,6 +23,71 @@ type DirectClient struct {
 
 func NewDirectClient(cm *ConfigManager) *DirectClient {
 	return &DirectClient{Config: cm}
+}
+
+var tokenExchangeCache = make(map[string]string)
+var tokenExchangeMutex sync.RWMutex
+
+func exchangeTokenIfNeeded(token, backend string) string {
+	if !strings.HasPrefix(token, "pt-") && !strings.HasPrefix(token, "qodercn-") {
+		return token
+	}
+
+	tokenExchangeMutex.RLock()
+	if cached, ok := tokenExchangeCache[token]; ok {
+		tokenExchangeMutex.RUnlock()
+		return cached
+	}
+	tokenExchangeMutex.RUnlock()
+
+	baseURL := "https://openapi.qoder.sh/api/v1"
+	if strings.ToLower(backend) == "cn" {
+		baseURL = "https://openapi.qoder.com.cn/api/v1"
+	}
+
+	exchangeURL := baseURL + "/jobToken/exchange"
+	reqBody := fmt.Sprintf(`{"personal_token":"%s"}`, token)
+	
+	req, err := http.NewRequest("POST", exchangeURL, strings.NewReader(reqBody))
+	if err != nil {
+		return token
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "qoder/1.0.22")
+	req.Header.Set("Cosy-Version", "1.0.22")
+	req.Header.Set("Cosy-ClientType", "5")
+	req.Header.Set("Cosy-MachineOS", "x86_64_win32")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return token
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+			var actual string
+			if t, ok := result["token"].(string); ok && t != "" {
+				actual = t
+			} else if t, ok := result["device_token"].(string); ok && t != "" {
+				actual = t
+			} else if t, ok := result["access_token"].(string); ok && t != "" {
+				actual = t
+			}
+			
+			if actual != "" {
+				AddSystemLog("Successfully exchanged personal token for device token", "info", "direct")
+				tokenExchangeMutex.Lock()
+				tokenExchangeCache[token] = actual
+				tokenExchangeMutex.Unlock()
+				return actual
+			}
+		}
+	}
+	
+	return token
 }
 
 func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) bool {
@@ -47,8 +113,9 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 		return false
 	}
 
+	actualToken := exchangeTokenIfNeeded(cfg.Token, cfg.Backend)
 	hReq.Header.Set("Content-Type", "application/json")
-	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	hReq.Header.Set("Authorization", "Bearer "+actualToken)
 	// Simulate Qoder CLI / IDE Extension to allow Personal Access Tokens (PAT)
 	hReq.Header.Set("User-Agent", "qoder/1.0.22")
 	hReq.Header.Set("Cosy-Version", "1.0.22")
@@ -120,8 +187,9 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 		return false
 	}
 
+	actualToken := exchangeTokenIfNeeded(cfg.Token, cfg.Backend)
 	hReq.Header.Set("Content-Type", "application/json")
-	hReq.Header.Set("Authorization", "Bearer "+cfg.Token)
+	hReq.Header.Set("Authorization", "Bearer "+actualToken)
 	hReq.Header.Set("Accept", "text/event-stream")
 	// Simulate Qoder CLI / IDE Extension to allow Personal Access Tokens (PAT)
 	hReq.Header.Set("User-Agent", "qoder/1.0.22")
