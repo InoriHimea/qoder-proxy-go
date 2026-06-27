@@ -447,6 +447,7 @@ function renderSettings() {
           <option value="free">Free</option>
         </select>
         <button class="btn btn-sm" onclick="addModel()">Add Model</button>
+        <button class="btn btn-sm" style="margin-left:8px;background:var(--accent);color:#fff" onclick="refreshModels()">Auto Fetch Latest</button>
       </div>
     </div>`;
   renderModelsTable();
@@ -469,6 +470,22 @@ window.addModel = () => {
   state.settings.models.push({ id, label, tier, description: `${label} (custom)` });
   renderModelsTable();
   $('new-m-id').value = ''; $('new-m-label').value = '';
+};
+
+window.refreshModels = async () => {
+  try {
+    const res = await api('/dashboard/api/models/refresh', { method: 'POST' });
+    if (res.models && res.models.length > 0) {
+      state.settings.models = res.models;
+      state.models = res.models;
+      renderModelsTable();
+      showToast('Models refreshed successfully');
+    } else {
+      showToast('No models found', 'error');
+    }
+  } catch (err) {
+    showToast(`Error refreshing models: ${err.message}`, 'error');
+  }
 };
 
 window.deleteModel = (i) => {

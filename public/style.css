@@ -235,3 +235,9 @@ td{padding:10px 14px;color:var(--text2);vertical-align:middle}
 .modal-close:hover{color:var(--error)}
 .modal-body{flex:1;overflow-y:auto;padding:24px}
 .modal-footer{padding:14px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end}
+
+.toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; font-weight: 500; font-size: 14px; opacity: 0; transform: translateY(20px); transition: all 0.3s ease; z-index: 9999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); pointer-events: none; }
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast-success { background: #10b981; }
+.toast-error { background: #ef4444; }
+

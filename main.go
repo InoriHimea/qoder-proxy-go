@@ -106,6 +106,9 @@ func main() {
 	r.GET("/dashboard/api/models", func(ctx *fasthttp.RequestCtx) {
 		handleModels(ctx, cm)
 	})
+	r.POST("/dashboard/api/models/refresh", func(ctx *fasthttp.RequestCtx) {
+		handleModelsRefresh(ctx, cm)
+	})
 	r.GET("/dashboard/api/logs", handleGetRequestLogs)
 	r.GET("/dashboard/api/logs/{id}", handleGetRequestLogDetail)
 	r.DELETE("/dashboard/api/logs", handleClearRequestLogs)

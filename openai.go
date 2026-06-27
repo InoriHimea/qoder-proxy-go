@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"runtime"
+	"os/exec"
 
 	"github.com/valyala/fasthttp"
 )
@@ -481,3 +483,52 @@ func extractSystemAndPrompt(messages []Message) (string, string) {
 	}
 	return strings.TrimSpace(sysSb.String()), strings.TrimSpace(userSb.String())
 }
+
+func handleModelsRefresh(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	binaryName := "qodercli"
+	if strings.ToLower(cm.Get().Backend) == "cn" {
+		binaryName = "qoderclicn"
+	}
+	cmdPath := binaryName
+	if runtime.GOOS == "windows" {
+		cmdPath = binaryName + ".cmd"
+	}
+	out, err := exec.Command(cmdPath, "chat", "--list-models").Output()
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Failed to run qoderclicn: %v", err), 500)
+		return
+	}
+	
+	lines := strings.Split(string(out), "\n")
+	var newModels []Model
+	seen := make(map[string]bool)
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "MODEL" || strings.Contains(line, "Warning:") {
+			continue
+		}
+		if !seen[line] {
+			seen[line] = true
+			tier := "paid"
+			if strings.Contains(line, "Flash") || line == "Auto" {
+				tier = "free"
+			}
+			newModels = append(newModels, Model{
+				ID: line,
+				Label: line,
+				Tier: tier,
+				Description: "Auto-detected model",
+			})
+		}
+	}
+	
+	if len(newModels) > 0 {
+		cfg := cm.Get()
+		cfg.Models = newModels
+		cm.Update(cfg)
+	}
+	
+	json.NewEncoder(ctx).Encode(map[string]interface{}{"ok": true, "models": newModels})
+}
+
