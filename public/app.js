@@ -411,7 +411,7 @@ function renderSettings() {
         </div>
         <div class="field">
           <label>Personal Access Token</label>
-          <input type="password" id="set-token" placeholder="${state.settings.token || 'Enter new token...'}" class="input-full">
+          <input type="password" id="set-token" autocomplete="new-password" placeholder="${state.settings.token || 'Enter new token...'}" class="input-full">
           <p class="field-help">Changes take effect immediately for new requests.</p>
         </div>
         <div class="field">
