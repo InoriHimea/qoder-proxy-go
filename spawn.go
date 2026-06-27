@@ -69,9 +69,11 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	if opts.MaxTokens > 0 {
 		args = append(args, "--max-output-tokens", fmt.Sprintf("%d", opts.MaxTokens))
 	}
-	if opts.SystemPrompt != "" {
-		args = append(args, "--system-prompt", opts.SystemPrompt)
+	sysPrompt := opts.SystemPrompt
+	if sysPrompt == "" {
+		sysPrompt = "You are a helpful AI assistant." // Overrides Qoder's massive default system prompt
 	}
+	args = append(args, "--system-prompt", sysPrompt)
 	if opts.DisableTools {
 		args = append(args, "--tools", "")
 	}
