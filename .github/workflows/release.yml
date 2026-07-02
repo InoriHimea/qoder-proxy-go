@@ -3,7 +3,6 @@ name: CI/CD
 on:
   push:
     branches: [ "go-rewrite", "main" ]
-    tags: [ "v*.*.*" ]
   workflow_dispatch:
 
 env:
@@ -15,12 +14,68 @@ permissions:
   packages: write
 
 jobs:
+  version:
+    name: Bump Version & Tag
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, '[skip]') && !contains(github.event.head_commit.message, '[nobump]')"
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: bump
+        name: Bump Version
+        run: |
+          # Read old version from git HEAD~1:main.go if possible
+          OLD_VERSION=$(git show HEAD~1:main.go 2>/dev/null | grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+          NEW_VERSION=$(grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' main.go)
+
+          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+            echo "Version unchanged ($NEW_VERSION). Bumping patch."
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$NEW_VERSION"
+            PATCH=$((PATCH + 1))
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            sed -i "s/serverVersion = \".*\"/serverVersion = \"${NEW_VERSION}\"/" main.go
+            sed -i "s/${OLD_VERSION}/${NEW_VERSION}/g" dashboard.go
+            echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          else
+            echo "Version already bumped: ${NEW_VERSION}"
+            echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit & Tag
+        if: "steps.bump.outputs.new_version != ''"
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          OLD_VERSION=$(git show HEAD:main.go | grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+')
+          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
+
+          if [ "$OLD_VERSION" != "$NEW_VERSION" ]; then
+            git add main.go dashboard.go
+            git commit -m "chore: bump version to ${NEW_VERSION} [nobump]"
+            git tag "v${NEW_VERSION}"
+            git push origin HEAD --follow-tags
+          else
+            # Tag current commit if not already tagged
+            if ! git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
+              git tag "v${NEW_VERSION}"
+              git push origin "v${NEW_VERSION}"
+            fi
+          fi
+
   docker:
     name: Build & Push Docker Image
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: "refs/tags/v${{ needs.version.outputs.new_version }}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -41,8 +96,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha
 
       - name: Build and push
@@ -58,34 +113,37 @@ jobs:
 
   release:
     name: Build & Release Binaries
+    needs: version
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
-      
+        with:
+          ref: "refs/tags/v${{ needs.version.outputs.new_version }}"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-          
+
       - name: Build Linux amd64
         run: GOOS=linux GOARCH=amd64 go build -o qoder-proxy-linux-amd64 .
-        
+
       - name: Build Linux arm64
         run: GOOS=linux GOARCH=arm64 go build -o qoder-proxy-linux-arm64 .
-        
+
       - name: Build Windows amd64
         run: GOOS=windows GOARCH=amd64 go build -o qoder-proxy-windows-amd64.exe .
-        
+
       - name: Build macOS amd64
         run: GOOS=darwin GOARCH=amd64 go build -o qoder-proxy-darwin-amd64 .
-        
+
       - name: Build macOS arm64
         run: GOOS=darwin GOARCH=arm64 go build -o qoder-proxy-darwin-arm64 .
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "v${{ needs.version.outputs.new_version }}"
           files: |
             qoder-proxy-linux-amd64
             qoder-proxy-linux-arm64
