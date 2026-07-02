@@ -47,7 +47,7 @@ func exchangeTokenIfNeeded(token, backend string) string {
 
 	exchangeURL := baseURL + "/jobToken/exchange"
 	reqBody := fmt.Sprintf(`{"personal_token":"%s"}`, token)
-	
+
 	req, err := http.NewRequest("POST", exchangeURL, strings.NewReader(reqBody))
 	if err != nil {
 		return token
@@ -76,7 +76,7 @@ func exchangeTokenIfNeeded(token, backend string) string {
 			} else if t, ok := result["access_token"].(string); ok && t != "" {
 				actual = t
 			}
-			
+
 			if actual != "" {
 				AddSystemLog("Successfully exchanged personal token for device token", "info", "direct")
 				tokenExchangeMutex.Lock()
@@ -86,20 +86,86 @@ func exchangeTokenIfNeeded(token, backend string) string {
 			}
 		}
 	}
-	
+
 	return token
+}
+
+// refreshDeviceToken attempts to refresh an expired dt- token via Qoder's
+// deviceToken/refresh endpoint.  Returns the original token on failure.
+func refreshDeviceToken(currentDT, backend string) string {
+	if !strings.HasPrefix(currentDT, "dt-") {
+		return currentDT
+	}
+
+	tokenExchangeMutex.RLock()
+	if cached, ok := tokenExchangeCache[currentDT]; ok {
+		tokenExchangeMutex.RUnlock()
+		return cached
+	}
+	tokenExchangeMutex.RUnlock()
+
+	baseURL := "https://openapi.qoder.sh/api/v1"
+	if strings.ToLower(backend) == "cn" {
+		baseURL = "https://openapi.qoder.com.cn/api/v1"
+	}
+
+	refreshURL := baseURL + "/deviceToken/refresh"
+	reqBody := fmt.Sprintf(`{"device_token":"%s"}`, currentDT)
+
+	req, err := http.NewRequest("POST", refreshURL, strings.NewReader(reqBody))
+	if err != nil {
+		return currentDT
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "qoder/1.0.22")
+	req.Header.Set("Cosy-Version", "1.0.22")
+	req.Header.Set("Cosy-ClientType", "5")
+	req.Header.Set("Cosy-MachineOS", "x86_64_win32")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return currentDT
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 200 {
+		var result map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
+			var newToken string
+			if t, ok := result["token"].(string); ok && t != "" {
+				newToken = t
+			} else if t, ok := result["device_token"].(string); ok && t != "" {
+				newToken = t
+			} else if t, ok := result["access_token"].(string); ok && t != "" {
+				newToken = t
+			}
+
+			if newToken != "" && newToken != currentDT {
+				AddSystemLog("Successfully refreshed device token", "info", "direct")
+				tokenExchangeMutex.Lock()
+				tokenExchangeCache[currentDT] = newToken
+				tokenExchangeMutex.Unlock()
+				return newToken
+			}
+		}
+	}
+
+	AddSystemLog(fmt.Sprintf("Device token refresh failed (status %d). Token may need manual renewal.", resp.StatusCode), "warn", "direct")
+	return currentDT
 }
 
 func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) bool {
 	started := time.Now()
 	cfg := c.Config.Get()
 
-	baseURL := "https://openapi.qoder.sh/api/v1"
+	baseURL := "https://api2-v2.qoder.sh"
 	if strings.ToLower(cfg.Backend) == "cn" {
-		baseURL = "https://openapi.qoder.com.cn/api/v1"
+		// CN backend uses the same API host — only the token exchange endpoint differs
+		baseURL = "https://api2-v2.qoder.sh"
 	}
 
-	reqURL := baseURL + "/chat/completions"
+	reqURL := baseURL + "/model/v1/chat/completions"
 
 	body, _ := json.Marshal(req)
 
@@ -159,6 +225,31 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	defer hResp.Body.Close()
 
 	if hResp.StatusCode == 401 || hResp.StatusCode == 404 {
+		// Try refreshing dt- token once before falling back to CLI
+		if strings.HasPrefix(actualToken, "dt-") {
+			refreshed := refreshDeviceToken(actualToken, cfg.Backend)
+			if refreshed != actualToken {
+				AddSystemLog("Retrying direct API with refreshed token", "info", "direct")
+				hReq2, _ := http.NewRequest("POST", reqURL, bytes.NewReader(body))
+				hReq2.Header = hReq.Header.Clone()
+				hReq2.Header.Set("Authorization", "Bearer "+refreshed)
+				hResp2, err2 := client.Do(hReq2)
+				if err2 == nil && hResp2.StatusCode != 401 && hResp2.StatusCode != 404 {
+					defer hResp2.Body.Close()
+					respBody2, _ := io.ReadAll(hResp2.Body)
+					if hResp2.StatusCode < 400 {
+						ctx.SetStatusCode(hResp2.StatusCode)
+						ctx.SetContentType(hResp2.Header.Get("Content-Type"))
+						ctx.SetBody(respBody2)
+						sys, prompt := extractSystemAndPrompt(req.Messages)
+						um.Record(req.Model, len(sys)+len(prompt), len(respBody2), false, time.Since(started).Milliseconds())
+						return false
+					}
+				} else if err2 == nil {
+					hResp2.Body.Close()
+				}
+			}
+		}
 		AddSystemLog(fmt.Sprintf("Direct API backend returned %d, triggering fallback to CLI mode", hResp.StatusCode), "warn", "direct")
 		return true
 	}
@@ -173,6 +264,27 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 			ctx.SetBody(respBody)
 			return false
 		}
+		// Retry once with refreshed token on non-auth errors race
+		if strings.HasPrefix(actualToken, "dt-") {
+			refreshed := refreshDeviceToken(actualToken, cfg.Backend)
+			if refreshed != actualToken {
+				hReq2, _ := http.NewRequest("POST", reqURL, bytes.NewReader(body))
+				hReq2.Header = hReq.Header.Clone()
+				hReq2.Header.Set("Authorization", "Bearer "+refreshed)
+				if hResp2, err2 := client.Do(hReq2); err2 == nil {
+					defer hResp2.Body.Close()
+					respBody2, _ := io.ReadAll(hResp2.Body)
+					if hResp2.StatusCode < 400 {
+						ctx.SetStatusCode(hResp2.StatusCode)
+						ctx.SetContentType(hResp2.Header.Get("Content-Type"))
+						ctx.SetBody(respBody2)
+						sys, prompt := extractSystemAndPrompt(req.Messages)
+						um.Record(req.Model, len(sys)+len(prompt), len(respBody2), false, time.Since(started).Milliseconds())
+						return false
+					}
+				}
+			}
+		}
 		return true
 	}
 
@@ -184,7 +296,14 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, body []byte, req ChatRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
 
-	hReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
+	baseURL := "https://api2-v2.qoder.sh"
+	if strings.ToLower(cfg.Backend) == "cn" {
+		baseURL = "https://api2-v2.qoder.sh"
+	}
+
+	streamURL := baseURL + "/model/v1/chat/completions"
+
+	hReq, err := http.NewRequest("POST", streamURL, bytes.NewReader(body))
 	if err != nil {
 		ctx.Error(fmt.Sprintf("Failed to create stream request: %v", err), http.StatusInternalServerError)
 		return false

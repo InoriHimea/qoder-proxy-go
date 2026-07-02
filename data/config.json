@@ -1,0 +1,68 @@
+{
+  "backend": "cn",
+  "token": "dt-rgy2Lqvo0MgBnktkd4mI2GfH",
+  "use_direct_api": false,
+  "proxy_url": "",
+  "models": [
+    {
+      "id": "auto",
+      "label": "Auto (Smart Select)",
+      "tier": "paid",
+      "description": "Paid tier — automatically selects the best model per task."
+    },
+    {
+      "id": "ultimate",
+      "label": "Ultimate (Best Quality)",
+      "tier": "paid",
+      "description": "Paid tier — top-tier model, maximum quality."
+    },
+    {
+      "id": "performance",
+      "label": "Performance",
+      "tier": "paid",
+      "description": "Paid tier — high-performance model."
+    },
+    {
+      "id": "qmodel_latest",
+      "label": "Qwen3.7-Max",
+      "tier": "new",
+      "description": "New model — Qwen 3.7 Max (Alibaba)."
+    },
+    {
+      "id": "qmodel",
+      "label": "Qwen 3.6 Plus",
+      "tier": "new",
+      "description": "New model — Qwen 3.6 Plus (Alibaba)."
+    },
+    {
+      "id": "kmodel",
+      "label": "Kimi-K2.6",
+      "tier": "new",
+      "description": "New model — Kimi-K2.6 (Moonshot AI)."
+    },
+    {
+      "id": "mmodel",
+      "label": "MiniMax-M2.7",
+      "tier": "new",
+      "description": "New model — MiniMax-M2.7."
+    },
+    {
+      "id": "dmodel",
+      "label": "DeepSeek-V4-Pro",
+      "tier": "new",
+      "description": "New model — DeepSeek V4 Pro, reasoning-capable."
+    },
+    {
+      "id": "dfmodel",
+      "label": "DeepSeek-V4-Flash",
+      "tier": "new",
+      "description": "New model — DeepSeek V4 Flash, fast and lightweight."
+    },
+    {
+      "id": "gm51model",
+      "label": "GLM-5.1",
+      "tier": "new",
+      "description": "New model — GLM-5.1 series (Zhipu AI)."
+    }
+  ]
+}
