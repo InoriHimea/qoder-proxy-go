@@ -167,11 +167,14 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 
 	if hResp.StatusCode >= 400 {
 		AddSystemLog(fmt.Sprintf("Direct API backend returned %d: %s", hResp.StatusCode, string(respBody)), "warn", "direct")
+		if hResp.StatusCode != 401 && hResp.StatusCode != 404 {
+			ctx.SetStatusCode(hResp.StatusCode)
+			ctx.SetContentType("application/json")
+			ctx.SetBody(respBody)
+			return false
+		}
+		return true
 	}
-
-	ctx.SetStatusCode(hResp.StatusCode)
-	ctx.SetContentType(hResp.Header.Get("Content-Type"))
-	ctx.SetBody(respBody)
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	um.Record(req.Model, len(sys)+len(prompt), len(respBody), false, time.Since(started).Milliseconds())
@@ -241,7 +244,10 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 	}
 
 	if hResp.StatusCode >= 400 {
-		AddSystemLog(fmt.Sprintf("Direct Stream backend returned %d", hResp.StatusCode), "warn", "direct")
+		b, _ := io.ReadAll(hResp.Body)
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("Direct Stream backend returned %d: %s", hResp.StatusCode, string(b)), "warn", "direct")
+		return true
 	}
 	// We don't defer hResp.Body.Close() here because we pass it to the stream writer
 

@@ -91,6 +91,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 	}
 
 	prompt := anthropicMessagesToPrompt(req)
+	AddSystemLog(fmt.Sprintf("Anthropic system length: %d, Prompt length: %d", len(req.System), len(prompt)), "info", "cli")
 	opts := SpawnOptions{
 		Model:           req.Model,
 		ReasoningEffort: req.ReasoningEffort,
@@ -205,6 +206,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 
 	// Non-streaming logic
 	sys, prompt := extractSystemAndPrompt(req.Messages)
+	AddSystemLog(fmt.Sprintf("System prompt length: %d, Prompt length: %d", len(sys), len(prompt)), "info", "cli")
 	opts := SpawnOptions{
 		Model:           req.Model,
 		ReasoningEffort: req.ReasoningEffort,
@@ -234,21 +236,16 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 				if content := extractContentText(msg["content"]); content != "" {
 					contentBuilder.WriteString(content)
 				}
-			} else if line["type"] == "result" && line["subtype"] == "success" {
-				if res, ok := line["result"].(string); ok && res != "" {
-					contentBuilder.WriteString(res)
-				}
-			} else {
-
-				// Check for explicit error in result
-				if isErr, _ := line["is_error"].(bool); isErr {
-					if res, ok := line["result"].(string); ok {
-						cliErrorMsg = res
-					}
-				}
-				// Log other types of output for debugging
-				AddSystemLog(fmt.Sprintf("CLI output (non-message): %s", rawLine), "debug", "cli")
 			}
+
+			// Check for explicit error in result
+			if isErr, _ := line["is_error"].(bool); isErr {
+				if res, ok := line["result"].(string); ok {
+					cliErrorMsg = res
+				}
+			}
+			// Log other types of output for debugging
+			AddSystemLog(fmt.Sprintf("CLI output (non-message): %s", rawLine), "debug", "cli")
 		} else {
 			AddSystemLog(fmt.Sprintf("Failed to parse CLI output line: %s", rawLine), "warn", "cli")
 		}
@@ -351,14 +348,13 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		for scanner.Scan() {
 			var line map[string]interface{}
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-				if line["type"] == "assistant" {
-					if msg, ok := line["message"].(map[string]interface{}); ok {
-						if content := extractContentText(msg["content"]); content != "" {
-							outLen += len(content)
-							fullContent.WriteString(content)
-							chunk := ChatChunk{
-								ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-							}
+				if msg, ok := line["message"].(map[string]interface{}); ok {
+					if content := extractContentText(msg["content"]); content != "" {
+						outLen += len(content)
+						fullContent.WriteString(content)
+						chunk := ChatChunk{
+							ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
+						}
 							chunk.Choices = []struct {
 								Index int `json:"index"`
 								Delta struct {
@@ -378,32 +374,6 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 							w.Flush()
 						}
 					}
-				} else if line["type"] == "result" && line["subtype"] == "success" {
-					if res, ok := line["result"].(string); ok && res != "" {
-						outLen += len(res)
-						fullContent.WriteString(res)
-						chunk := ChatChunk{
-							ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-						}
-						chunk.Choices = []struct {
-							Index int `json:"index"`
-							Delta struct {
-								Role    string `json:"role,omitempty"`
-								Content string `json:"content,omitempty"`
-							} `json:"delta"`
-							FinishReason *string `json:"finish_reason"`
-						}{
-							{
-								Index: 0,
-							},
-						}
-						chunk.Choices[0].Delta.Content = res
-
-						data, _ := json.Marshal(chunk)
-						fmt.Fprintf(w, "data: %s\n\n", data)
-						w.Flush()
-					}
-				}
 			}
 		}
 
