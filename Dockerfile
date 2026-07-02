@@ -19,6 +19,7 @@ RUN mkdir -p /root/.qoder && echo '{"autoUpdates":false}' > /root/.qoder.json
 
 # Copy Go binary and static assets
 COPY --from=builder /build/qoder-proxy-go .
+COPY --from=builder /build/write_token.mjs .
 COPY public/ ./public/
 
 # Create data directory

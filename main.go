@@ -13,6 +13,8 @@ import (
 
 var startTime time.Time
 
+const serverVersion = "3.2.18"
+
 func main() {
 	startTime = time.Now()
 
@@ -42,7 +44,7 @@ func main() {
 	// ── Public Routes ────────────────────────────────────────────────────────────
 	r.GET("/", func(ctx *fasthttp.RequestCtx) {
 		ctx.SetContentType("application/json")
-		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"3.2.18","dashboard":"/dashboard/"}`)
+		fmt.Fprintf(ctx, `{"name":"Qoder Go Proxy","version":"%s","dashboard":"/dashboard/"}`, serverVersion)
 	})
 
 	r.GET("/health", func(ctx *fasthttp.RequestCtx) {

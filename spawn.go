@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,35 @@ import (
 	"runtime"
 	"strings"
 )
+
+//go:embed write_token.mjs
+var writeTokenScript []byte
+
+func writeDeviceTokenToKeychain(token, backendName string) error {
+	if token == "" {
+		return fmt.Errorf("token empty")
+	}
+
+	scriptDir, err := os.MkdirTemp("", "qoder-proxy-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	scriptPath := filepath.Join(scriptDir, "write_token.mjs")
+	if err := os.WriteFile(scriptPath, writeTokenScript, 0600); err != nil {
+		return fmt.Errorf("write embed script: %w", err)
+	}
+
+	AddSystemLog(fmt.Sprintf("Writing device token via embedded script (backend=%s)...", backendName), "info", "spawn")
+	cmd := exec.Command("node", scriptPath, backendName, token)
+	output, err := cmd.CombinedOutput()
+
+	os.RemoveAll(scriptDir)
+
+	if err != nil {
+		return fmt.Errorf("node exec failed (%w): %s", err, string(output))
+	}
+	return nil
+}
 
 type SpawnOptions struct {
 	Model           string
@@ -31,28 +61,8 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	}
 
 	if config.Token != "" {
-		// Look for write_token.mjs
-		scriptPath := "write_token.mjs"
-		if execPath, err := os.Executable(); err == nil {
-			execDir := filepath.Dir(execPath)
-			p := filepath.Join(execDir, "write_token.mjs")
-			if _, err := os.Stat(p); err == nil {
-				scriptPath = p
-			} else {
-				// Try current working directory as fallback
-				if cwd, err := os.Getwd(); err == nil {
-					p = filepath.Join(cwd, "write_token.mjs")
-					if _, err := os.Stat(p); err == nil {
-						scriptPath = p
-					}
-				}
-			}
-		}
-
-		AddSystemLog(fmt.Sprintf("Device token detected. Writing to local storage via %s...", scriptPath), "info", "spawn")
-		writeCmd := exec.Command("node", scriptPath, backendName, config.Token)
-		if output, err := writeCmd.CombinedOutput(); err != nil {
-			AddSystemLog(fmt.Sprintf("Failed to write device token to local storage: %v. Output: %s", err, string(output)), "error", "spawn")
+		if err := writeDeviceTokenToKeychain(config.Token, backendName); err != nil {
+			AddSystemLog(fmt.Sprintf("Failed to write device token to local storage: %v", err), "error", "spawn")
 		} else {
 			AddSystemLog("Device token successfully written to local storage", "info", "spawn")
 		}
