@@ -29,11 +29,11 @@ jobs:
       - id: bump
         name: Bump Version
         run: |
-          # Read old version from git HEAD~1:main.go if possible
+          # Compare versions from HEAD~1 (before this commit) vs HEAD (current)
           OLD_VERSION=$(git show HEAD~1:main.go 2>/dev/null | grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' || true)
           NEW_VERSION=$(grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' main.go)
 
-          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+          if [ -z "$OLD_VERSION" ] || [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
             echo "Version unchanged ($NEW_VERSION). Bumping patch."
             IFS='.' read -r MAJOR MINOR PATCH <<< "$NEW_VERSION"
             PATCH=$((PATCH + 1))
@@ -41,9 +41,17 @@ jobs:
             sed -i "s/serverVersion = \".*\"/serverVersion = \"${NEW_VERSION}\"/" main.go
             sed -i "s/${OLD_VERSION}/${NEW_VERSION}/g" dashboard.go
             echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+            # Auto-bumped — commit and tag
+            git add main.go dashboard.go
+            git commit -m "ci: auto bump to ${NEW_VERSION} [nobump]"
+            git tag "v${NEW_VERSION}"
+            git push origin HEAD --follow-tags
           else
-            echo "Version already bumped: ${NEW_VERSION}"
+            echo "Version already bumped: ${OLD_VERSION} → ${NEW_VERSION}"
             echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+            # Manually bumped — tag the current commit
+            git tag "v${NEW_VERSION}"
+            git push origin HEAD --follow-tags
           fi
 
       - name: Commit & Tag
