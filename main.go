@@ -72,10 +72,13 @@ func main() {
 	})
 	r.DELETE("/oauth/logout", func(ctx *fasthttp.RequestCtx) {
 		cm.Update(Config{
-			Backend:    cm.Get().Backend,
-			Token:      "",
-			ProxyURL:   cm.Get().ProxyURL,
-			Models:    cm.Get().Models,
+			Backend:      cm.Get().Backend,
+			Token:        "",
+			ProxyURL:     cm.Get().ProxyURL,
+			Models:       cm.Get().Models,
+			UserID:       "",
+			RefreshToken: "",
+			ExpireTime:   0,
 		})
 		json.NewEncoder(ctx).Encode(map[string]interface{}{"ok": true, "message": "OAuth token cleared"})
 	})
