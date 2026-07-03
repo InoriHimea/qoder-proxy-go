@@ -16,7 +16,7 @@ import (
 //go:embed write_token.mjs
 var writeTokenScript []byte
 
-func writeDeviceTokenToKeychain(token, backendName string) error {
+func writeDeviceTokenToKeychain(token, userID, refreshToken string, expireTime int64, backendName string) error {
 	if token == "" {
 		return fmt.Errorf("token empty")
 	}
@@ -30,8 +30,18 @@ func writeDeviceTokenToKeychain(token, backendName string) error {
 		return fmt.Errorf("write embed script: %w", err)
 	}
 
-	AddSystemLog(fmt.Sprintf("Writing device token via embedded script (backend=%s)...", backendName), "info", "spawn")
-	cmd := exec.Command("node", scriptPath, backendName, token)
+	AddSystemLog(fmt.Sprintf("Writing device token via embedded script (backend=%s, user=%s)...", backendName, userID), "info", "spawn")
+	args := []string{scriptPath, backendName, token}
+	if userID != "" {
+		args = append(args, userID)
+	}
+	if refreshToken != "" {
+		args = append(args, refreshToken)
+	}
+	if expireTime != 0 {
+		args = append(args, fmt.Sprintf("%d", expireTime))
+	}
+	cmd := exec.Command("node", args...)
 	output, err := cmd.CombinedOutput()
 
 	os.RemoveAll(scriptDir)
@@ -61,7 +71,7 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	}
 
 	if config.Token != "" {
-		if err := writeDeviceTokenToKeychain(config.Token, backendName); err != nil {
+		if err := writeDeviceTokenToKeychain(config.Token, config.UserID, config.RefreshToken, config.ExpireTime, backendName); err != nil {
 			AddSystemLog(fmt.Sprintf("Failed to write device token to local storage: %v", err), "error", "spawn")
 		} else {
 			AddSystemLog("Device token successfully written to local storage", "info", "spawn")

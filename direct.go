@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -155,6 +156,62 @@ func refreshDeviceToken(currentDT, backend string) string {
 	return currentDT
 }
 
+// refreshDeviceTokenViaOAuth attempts to refresh an expired dt- token via
+// the OAuth refresh_token grant. Falls back to the legacy refresh endpoint
+// when no refresh_token is available.
+func (c *DirectClient) refreshDeviceTokenViaOAuth(currentDT, backend, refreshToken string) string {
+	if !strings.HasPrefix(currentDT, "dt-") || refreshToken == "" {
+		return refreshDeviceToken(currentDT, backend)
+	}
+
+	// Check cache first
+	tokenExchangeMutex.RLock()
+	if cached, ok := tokenExchangeCache[currentDT]; ok {
+		tokenExchangeMutex.RUnlock()
+		return cached
+	}
+	tokenExchangeMutex.RUnlock()
+
+	oauthClient := NewOAuthClient(backend)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	result, err := oauthClient.RefreshToken(ctx, refreshToken)
+	if err != nil {
+		AddSystemLog(fmt.Sprintf("OAuth token refresh via refresh_token failed: %v, falling back to legacy refresh", err), "warn", "direct")
+		return refreshDeviceToken(currentDT, backend)
+	}
+
+	newToken := result.Token
+	if newToken == "" || newToken == currentDT {
+		AddSystemLog("OAuth refresh returned empty or identical token, falling back to legacy refresh", "warn", "direct")
+		return refreshDeviceToken(currentDT, backend)
+	}
+
+	// Update config with new token and refresh_token
+	cfg := c.Config.Get()
+	cfg.Token = newToken
+	if result.RefreshToken != "" {
+		cfg.RefreshToken = result.RefreshToken
+	}
+	if result.UserID != "" {
+		cfg.UserID = result.UserID
+	}
+	if result.ExpireTime != 0 {
+		cfg.ExpireTime = result.ExpireTime
+	}
+	if err := c.Config.Update(cfg); err != nil {
+		AddSystemLog(fmt.Sprintf("Failed to persist refreshed token to config: %v", err), "error", "direct")
+	} else {
+		AddSystemLog("OAuth token refreshed successfully via refresh_token, new token stored", "info", "direct")
+		tokenExchangeMutex.Lock()
+		tokenExchangeCache[currentDT] = newToken
+		tokenExchangeMutex.Unlock()
+	}
+
+	return newToken
+}
+
 func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) bool {
 	started := time.Now()
 	cfg := c.Config.Get()
@@ -225,11 +282,11 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	defer hResp.Body.Close()
 
 	if hResp.StatusCode == 401 || hResp.StatusCode == 404 {
-		// Try refreshing dt- token once before falling back to CLI
+		// Try refreshing dt- token via OAuth flow before falling back to CLI
 		if strings.HasPrefix(actualToken, "dt-") {
-			refreshed := refreshDeviceToken(actualToken, cfg.Backend)
+			refreshed := c.refreshDeviceTokenViaOAuth(actualToken, cfg.Backend, cfg.RefreshToken)
 			if refreshed != actualToken {
-				AddSystemLog("Retrying direct API with refreshed token", "info", "direct")
+				AddSystemLog("Retrying direct API with refreshed OAuth token", "info", "direct")
 				hReq2, _ := http.NewRequest("POST", reqURL, bytes.NewReader(body))
 				hReq2.Header = hReq.Header.Clone()
 				hReq2.Header.Set("Authorization", "Bearer "+refreshed)

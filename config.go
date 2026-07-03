@@ -20,6 +20,10 @@ type Config struct {
 	UseDirectAPI bool    `json:"use_direct_api"`
 	ProxyURL     string  `json:"proxy_url"`
 	Models       []Model `json:"models"`
+	// OAuth fields (set by /oauth/login flow)
+	UserID       string `json:"user_id,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	ExpireTime   int64  `json:"expire_time,omitempty"`
 }
 
 var DefaultModels = []Model{

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fasthttp/router"
@@ -39,7 +40,45 @@ func main() {
 
 	dc := NewDirectClient(cm)
 
+	// ── OAuth Login ──────────────────────────────────────────────────────────────
+	oc := NewOAuthClient(cm.Get().Backend)
+
 	r := router.New()
+
+	r.POST("/oauth/login", func(ctx *fasthttp.RequestCtx) {
+		sessionID, authURL, err := oc.CreateLoginSession()
+		if err != nil {
+			ctx.SetStatusCode(500)
+			json.NewEncoder(ctx).Encode(map[string]interface{}{
+				"error": fmt.Sprintf("failed to create OAuth session: %v", err),
+			})
+			return
+		}
+		json.NewEncoder(ctx).Encode(map[string]interface{}{
+			"session_id": sessionID,
+			"auth_url":   authURL,
+			"message":    "Open the auth URL in your browser to login, then GET /oauth/session/<session_id> for result.",
+		})
+	})
+	r.GET("/oauth/session/{session_id}", func(ctx *fasthttp.RequestCtx) {
+		sessionID := ctx.UserValue("session_id").(string)
+		result, err := oc.GetSessionResult(sessionID, 300)
+		if err != nil {
+			ctx.SetStatusCode(500)
+			json.NewEncoder(ctx).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(ctx).Encode(result)
+	})
+	r.DELETE("/oauth/logout", func(ctx *fasthttp.RequestCtx) {
+		cm.Update(Config{
+			Backend:    cm.Get().Backend,
+			Token:      "",
+			ProxyURL:   cm.Get().ProxyURL,
+			Models:    cm.Get().Models,
+		})
+		json.NewEncoder(ctx).Encode(map[string]interface{}{"ok": true, "message": "OAuth token cleared"})
+	})
 
 	// ── Public Routes ────────────────────────────────────────────────────────────
 	r.GET("/", func(ctx *fasthttp.RequestCtx) {
@@ -110,6 +149,9 @@ func main() {
 	})
 	r.POST("/dashboard/api/models/refresh", func(ctx *fasthttp.RequestCtx) {
 		handleModelsRefresh(ctx, cm)
+	})
+	r.GET("/dashboard/api/oauth/status", func(ctx *fasthttp.RequestCtx) {
+		handleOAuthStatus(ctx, cm)
 	})
 	r.GET("/dashboard/api/logs", handleGetRequestLogs)
 	r.GET("/dashboard/api/logs/{id}", handleGetRequestLogDetail)
@@ -196,6 +238,33 @@ func main() {
 
 	fmt.Printf("🚀 Qoder Go Proxy starting on :%s\n", port)
 	AddSystemLog("Qoder Proxy starting...", "info", "system")
+
+	// ── OAuth Token Refresh Goroutine ──────────────────────────────────────────────
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		var refreshingMu sync.Mutex
+
+		for range ticker.C {
+			cfg := cm.Get()
+			if !strings.HasPrefix(cfg.Token, "dt-") || cfg.ExpireTime == 0 || cfg.RefreshToken == "" {
+				continue
+			}
+
+			refreshingMu.Lock()
+			now := time.Now().Unix()
+			if cfg.ExpireTime-now <= 1800 { // 30 minutes
+				refreshed := dc.refreshDeviceTokenViaOAuth(cfg.Token, cfg.Backend, cfg.RefreshToken)
+				if refreshed != cfg.Token {
+					AddSystemLog("Background OAuth token refresh succeeded", "info", "oauth")
+				} else {
+					AddSystemLog("Background OAuth token refresh unchanged or failed", "warn", "oauth")
+				}
+			}
+			refreshingMu.Unlock()
+		}
+	}()
+
 	if err := fasthttp.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("Error in ListenAndServe: %s", err)
 	}

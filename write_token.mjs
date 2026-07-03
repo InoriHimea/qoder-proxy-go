@@ -6,9 +6,12 @@ import { execSync } from 'child_process';
 
 const backend = process.argv[2] || 'cn'; // 'cn' or 'global'
 const token = process.argv[3];
+const userId = process.argv[4] || '';
+const refreshToken = process.argv[5] || '';
+const expireTime = process.argv[6] ? parseInt(process.argv[6], 10) : 2000000000;
 
 if (!token) {
-    console.error('Usage: node write_token.mjs <backend> <token>');
+    console.error('Usage: node write_token.mjs <backend> <token> [userId] [refreshToken] [expireTime]');
     process.exit(1);
 }
 
@@ -153,13 +156,13 @@ try {
     await HT();
     
     const credentials = {
-        uid: "019ece1a-7036-75f3-be32-145c882786df",
+        uid: userId || "019ece1a-7036-75f3-be32-145c882786df",
         name: "qoder_user",
         security_oauth_token: finalToken,
         access_token: finalToken,
-        refresh_token: "drt-dummy",
-        expire_time: 2000000000,
-        refresh_token_expire_time: 2000000000,
+        refresh_token: refreshToken || "drt-dummy",
+        expire_time: expireTime,
+        refresh_token_expire_time: expireTime,
         login_method: "browser",
         login_timestamp: Math.floor(Date.now() / 1000),
         data_policy_agreed: true

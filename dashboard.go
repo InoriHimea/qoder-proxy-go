@@ -93,6 +93,32 @@ func handleConfig(ctx *fasthttp.RequestCtx) {
 	json.NewEncoder(ctx).Encode(resp)
 }
 
+func handleOAuthStatus(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	cfg := cm.Get()
+
+	resp := map[string]interface{}{
+		"tokenType":     "",
+		"userID":        cfg.UserID,
+		"expireTime":    cfg.ExpireTime,
+		"hasRefresh":    cfg.RefreshToken != "",
+	}
+
+	if cfg.Token == "" {
+		resp["loggedIn"] = false
+	} else if strings.HasPrefix(cfg.Token, "dt-") {
+		resp["loggedIn"] = true
+		resp["tokenType"] = "device_token"
+	} else if strings.HasPrefix(cfg.Token, "pt-") || strings.HasPrefix(cfg.Token, "qodercn-") {
+		resp["loggedIn"] = true
+		resp["tokenType"] = "personal_access_token"
+	} else {
+		resp["loggedIn"] = true
+		resp["tokenType"] = "unknown"
+	}
+
+	json.NewEncoder(ctx).Encode(resp)
+}
+
 func handleUsageLocal(ctx *fasthttp.RequestCtx, um *UsageManager) {
 	json.NewEncoder(ctx).Encode(um.Get())
 }
