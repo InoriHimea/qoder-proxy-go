@@ -26,6 +26,11 @@ jobs:
           fetch-depth: 2
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - id: bump
         name: Bump Version
         run: |
@@ -49,9 +54,9 @@ jobs:
           else
             echo "Version already bumped: ${OLD_VERSION} → ${NEW_VERSION}"
             echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-            # Manually bumped — tag the current commit
-            git tag "v${NEW_VERSION}"
-            git push origin HEAD --follow-tags
+            # Manually bumped — tag the current commit (skip if tag already exists)
+            git tag "v${NEW_VERSION}" 2>/dev/null || echo "Tag v${NEW_VERSION} already exists, skipping"
+            git push origin "v${NEW_VERSION}" 2>/dev/null || echo "Tag already pushed"
           fi
 
       - name: Commit & Tag
