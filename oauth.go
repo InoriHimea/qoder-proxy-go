@@ -7,6 +7,7 @@ import (
   "encoding/base64"
  	"encoding/json"
  	"fmt"
+ 	"io"
  	"net/http"
  	"net/url"
  	"strings"
@@ -52,6 +53,16 @@ type OAuthStore struct {
 }
 
 var oauthStore = &OAuthStore{sessions: make(map[string]*OAuthSession)}
+
+// newNoProxyClient bypasses HTTP_PROXY/HTTPS_PROXY env vars for OAuth auth
+// calls. Deployments sit behind a MITM-decrypting proxy whose self-signed CA
+// the container doesn't trust, breaking TLS verification for these hosts.
+func newNoProxyClient(timeout time.Duration) *http.Client {
+  return &http.Client{
+    Timeout:   timeout,
+    Transport: &http.Transport{Proxy: nil},
+  }
+}
 
 func (s *OAuthStore) Get(id string) (*OAuthSession, bool) {
 	s.mu.RLock()
@@ -99,7 +110,7 @@ func (c *OAuthClient) AuthorizationURL(verifier, challenge, nonce string) string
 }
 
 func (c *OAuthClient) PollDeviceToken(ctx context.Context, verifier, nonce, clientID string) (*OAuthResult, error) {
-  client := &http.Client{Timeout: 30 * time.Second}
+  client := newNoProxyClient(30 * time.Second)
   openAPIHost := c.OpenAPIHost
   if strings.Contains(openAPIHost, "qoder.com.cn") {
     openAPIHost = "openapi.qoder.com.cn"
@@ -127,8 +138,12 @@ func (c *OAuthClient) PollDeviceToken(ctx context.Context, verifier, nonce, clie
 
       resp, err := client.Do(req)
       if err != nil {
+        AddSystemLog(fmt.Sprintf("OAuth poll request error: %v", err), "warn", "oauth")
         continue
       }
+
+      rawBody, _ := io.ReadAll(resp.Body)
+      resp.Body.Close()
 
       var body struct {
         Token        string `json:"token"`
@@ -136,27 +151,28 @@ func (c *OAuthClient) PollDeviceToken(ctx context.Context, verifier, nonce, clie
         Error        string `json:"error"`
       }
 
-      if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
-        if resp.StatusCode == 200 && body.Token != "" {
-          resp.Body.Close()
-          return &OAuthResult{
-            Token:        body.Token,
-            RefreshToken: body.RefreshToken,
-          }, nil
-        }
-        resp.Body.Close()
-        // 404 = user hasn't approved yet, continue polling
-        if resp.StatusCode == 404 {
-          continue
-        }
+      if err := json.Unmarshal(rawBody, &body); err != nil {
+        AddSystemLog(fmt.Sprintf("OAuth poll unexpected response (status=%d): %s", resp.StatusCode, string(rawBody)), "warn", "oauth")
+        continue
       }
-      resp.Body.Close()
+
+      if resp.StatusCode == 200 && body.Token != "" {
+        return &OAuthResult{
+          Token:        body.Token,
+          RefreshToken: body.RefreshToken,
+        }, nil
+      }
+      // 404 = user hasn't approved yet, continue polling
+      if resp.StatusCode == 404 {
+        continue
+      }
+      AddSystemLog(fmt.Sprintf("OAuth poll non-200/404 response (status=%d): %s", resp.StatusCode, string(rawBody)), "warn", "oauth")
     }
   }
 }
 
 func (c *OAuthClient) RefreshToken(ctx context.Context, refreshToken string) (*OAuthResult, error) {
-  client := &http.Client{Timeout: 10 * time.Second}
+  client := newNoProxyClient(10 * time.Second)
   openAPIHost := c.OpenAPIHost
   if strings.Contains(openAPIHost, "qoder.com.cn") {
     openAPIHost = "openapi.qoder.com.cn"
@@ -202,7 +218,7 @@ func (c *OAuthClient) RefreshToken(ctx context.Context, refreshToken string) (*O
 }
 
 func (c *OAuthClient) GetUserInfo(ctx context.Context, token string) (*OAuthResult, error) {
-  client := &http.Client{Timeout: 10 * time.Second}
+  client := newNoProxyClient(10 * time.Second)
   openAPIHost := c.OpenAPIHost
   if strings.Contains(openAPIHost, "qoder.com.cn") {
     openAPIHost = "openapi.qoder.com.cn"
