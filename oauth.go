@@ -311,7 +311,7 @@ func (c *OAuthClient) CleanupExpiredSessions() {
 func NewOAuthClient(backend string) *OAuthClient {
   if strings.ToLower(backend) == "cn" {
     return &OAuthClient{
-      ClientID:        "e93fe488-5778-4c35-a6fc-0f54ed7b3139",
+      ClientID:        "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
       AuthHost:        "qoder.com.cn",
       OpenAPIHost:     "openapi.qoder.com.cn",
       ModelServerHost: "api2-v2.qoder.com.cn",
