@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.3.1"
+const serverVersion = "3.4.0"
 
 func main() {
 	startTime = time.Now()
@@ -40,12 +40,10 @@ func main() {
 
 	dc := NewDirectClient(cm)
 
-	// ── OAuth Login ──────────────────────────────────────────────────────────────
-	oc := NewOAuthClient(cm.Get().Backend)
-
 	r := router.New()
 
 	r.POST("/oauth/login", func(ctx *fasthttp.RequestCtx) {
+		oc := NewOAuthClient(cm.Get().Backend)
 		sessionID, authURL, err := oc.CreateLoginSession()
 		if err != nil {
 			ctx.SetStatusCode(500)
@@ -62,11 +60,30 @@ func main() {
 	})
 	r.GET("/oauth/session/{session_id}", func(ctx *fasthttp.RequestCtx) {
 		sessionID := ctx.UserValue("session_id").(string)
+		oc := NewOAuthClient(cm.Get().Backend)
 		result, err := oc.GetSessionResult(sessionID, 300)
 		if err != nil {
 			ctx.SetStatusCode(500)
 			json.NewEncoder(ctx).Encode(map[string]interface{}{"error": err.Error()})
 			return
+		}
+		if result.Error == "" && result.Token != "" {
+			cfg := cm.Get()
+			cfg.Token = result.Token
+			if result.RefreshToken != "" {
+				cfg.RefreshToken = result.RefreshToken
+			}
+			if result.UserID != "" {
+				cfg.UserID = result.UserID
+			}
+			if result.ExpireTime != 0 {
+				cfg.ExpireTime = result.ExpireTime
+			}
+			if err := cm.Update(cfg); err != nil {
+				AddSystemLog(fmt.Sprintf("Failed to persist OAuth login token: %v", err), "error", "oauth")
+			} else {
+				AddSystemLog("OAuth login succeeded, device token stored", "info", "oauth")
+			}
 		}
 		json.NewEncoder(ctx).Encode(result)
 	})

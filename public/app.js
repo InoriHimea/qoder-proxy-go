@@ -431,6 +431,18 @@ function renderSettings() {
     </div>
 
     <div class="card">
+      <div class="card-title">OAuth Login (Device Code)</div>
+      <div class="settings-form">
+        <div id="oauth-status-line" class="field-help">Checking OAuth status...</div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn btn-primary" id="oauth-login-btn" onclick="startOAuthLogin()">Login via OAuth</button>
+          <button class="btn btn-sm btn-danger" id="oauth-logout-btn" onclick="oauthLogout()" style="display:none;">Logout</button>
+        </div>
+        <div id="oauth-login-hint" class="field-help" style="display:none; margin-top:8px;"></div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-title">Custom Models</div>
       <div class="models-table-wrap">
         <table class="models-table">
@@ -451,7 +463,69 @@ function renderSettings() {
       </div>
     </div>`;
   renderModelsTable();
+  refreshOAuthStatus();
 }
+
+async function refreshOAuthStatus() {
+  const line = $('oauth-status-line');
+  if (!line) return;
+  try {
+    const st = await api('/dashboard/api/oauth/status');
+    if (st.loggedIn) {
+      line.textContent = `Logged in via ${st.tokenType === 'device_token' ? 'OAuth (device token)' : st.tokenType}` +
+        (st.userID ? ` — user: ${st.userID}` : '') +
+        (st.expireTime ? ` — expires: ${new Date(st.expireTime * 1000).toLocaleString()}` : '');
+      $('oauth-logout-btn').style.display = '';
+    } else {
+      line.textContent = 'Not logged in.';
+      $('oauth-logout-btn').style.display = 'none';
+    }
+  } catch (err) {
+    line.textContent = `Could not load OAuth status: ${err.message}`;
+  }
+}
+
+window.startOAuthLogin = async () => {
+  const btn = $('oauth-login-btn');
+  const hint = $('oauth-login-hint');
+  btn.disabled = true;
+  hint.style.display = '';
+  hint.textContent = 'Creating login session...';
+  try {
+    const { session_id, auth_url } = await api('/oauth/login', { method: 'POST' });
+    hint.innerHTML = `Open this URL to authorize: <a href="${escHtml(auth_url)}" target="_blank" rel="noopener">${escHtml(auth_url)}</a><br>Waiting for approval...`;
+    window.open(auth_url, '_blank');
+
+    const result = await api(`/oauth/session/${session_id}`);
+    if (result.error) {
+      hint.textContent = `OAuth login failed: ${result.error}`;
+      showToast(`OAuth login failed: ${result.error}`, 'error');
+    } else {
+      hint.textContent = 'OAuth login succeeded!';
+      showToast('OAuth login succeeded');
+      const stg = await api('/dashboard/api/settings');
+      state.settings = stg;
+      await refreshOAuthStatus();
+    }
+  } catch (err) {
+    hint.textContent = `Error: ${err.message}`;
+    showToast(`OAuth login error: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+window.oauthLogout = async () => {
+  try {
+    await api('/oauth/logout', { method: 'DELETE' });
+    showToast('OAuth token cleared');
+    const stg = await api('/dashboard/api/settings');
+    state.settings = stg;
+    await refreshOAuthStatus();
+  } catch (err) {
+    showToast(`Error logging out: ${err.message}`, 'error');
+  }
+};
 
 function renderModelsTable() {
   const tbody = $('models-tbody');
