@@ -54,16 +54,6 @@ type OAuthStore struct {
 
 var oauthStore = &OAuthStore{sessions: make(map[string]*OAuthSession)}
 
-// newNoProxyClient bypasses HTTP_PROXY/HTTPS_PROXY env vars for OAuth auth
-// calls. Deployments sit behind a MITM-decrypting proxy whose self-signed CA
-// the container doesn't trust, breaking TLS verification for these hosts.
-func newNoProxyClient(timeout time.Duration) *http.Client {
-  return &http.Client{
-    Timeout:   timeout,
-    Transport: &http.Transport{Proxy: nil},
-  }
-}
-
 func (s *OAuthStore) Get(id string) (*OAuthSession, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -110,7 +100,7 @@ func (c *OAuthClient) AuthorizationURL(verifier, challenge, nonce string) string
 }
 
 func (c *OAuthClient) PollDeviceToken(ctx context.Context, verifier, nonce, clientID string) (*OAuthResult, error) {
-  client := newNoProxyClient(30 * time.Second)
+  client := &http.Client{Timeout: 30 * time.Second}
   openAPIHost := c.OpenAPIHost
   if strings.Contains(openAPIHost, "qoder.com.cn") {
     openAPIHost = "openapi.qoder.com.cn"
@@ -172,7 +162,7 @@ func (c *OAuthClient) PollDeviceToken(ctx context.Context, verifier, nonce, clie
 }
 
 func (c *OAuthClient) RefreshToken(ctx context.Context, refreshToken string) (*OAuthResult, error) {
-  client := newNoProxyClient(10 * time.Second)
+  client := &http.Client{Timeout: 10 * time.Second}
   openAPIHost := c.OpenAPIHost
   if strings.Contains(openAPIHost, "qoder.com.cn") {
     openAPIHost = "openapi.qoder.com.cn"
@@ -218,7 +208,7 @@ func (c *OAuthClient) RefreshToken(ctx context.Context, refreshToken string) (*O
 }
 
 func (c *OAuthClient) GetUserInfo(ctx context.Context, token string) (*OAuthResult, error) {
-  client := newNoProxyClient(10 * time.Second)
+  client := &http.Client{Timeout: 10 * time.Second}
   openAPIHost := c.OpenAPIHost
   if strings.Contains(openAPIHost, "qoder.com.cn") {
     openAPIHost = "openapi.qoder.com.cn"

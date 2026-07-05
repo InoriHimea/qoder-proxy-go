@@ -11,6 +11,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o qoder-proxy-go .
 FROM node:20-slim
 WORKDIR /app
 
+# node:20-slim ships without a CA bundle, which breaks TLS verification
+# for all outbound HTTPS (OAuth polling, token refresh, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install qodercli and qoderclicn globally (needed by the Go proxy)
 RUN npm install -g @qoder-ai/qodercli @qodercn-ai/qoderclicn
 

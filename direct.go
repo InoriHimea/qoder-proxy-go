@@ -59,7 +59,7 @@ func exchangeTokenIfNeeded(token, backend string) string {
 	req.Header.Set("Cosy-ClientType", "5")
 	req.Header.Set("Cosy-MachineOS", "x86_64_win32")
 
-	client := newNoProxyClient(10 * time.Second)
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return token
@@ -123,7 +123,7 @@ func refreshDeviceToken(currentDT, backend string) string {
 	req.Header.Set("Cosy-ClientType", "5")
 	req.Header.Set("Cosy-MachineOS", "x86_64_win32")
 
-	client := newNoProxyClient(10 * time.Second)
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return currentDT
