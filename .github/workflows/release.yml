@@ -32,8 +32,9 @@ jobs:
 
       - id: version
         name: Resolve Version
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
           CURRENT=$(grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' main.go)
 
           # [nobump] or [skip]: skip the bump, but still output the current version for docker/release
