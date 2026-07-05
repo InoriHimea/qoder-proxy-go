@@ -15,11 +15,10 @@ permissions:
 
 jobs:
   version:
-    name: Bump Version & Tag
+    name: Read & Bump Version
     runs-on: ubuntu-latest
-    if: "!startsWith(github.event.head_commit.message, '[skip]') && !contains(github.event.head_commit.message, '[nobump]')"
     outputs:
-      new_version: ${{ steps.bump.outputs.new_version }}
+      new_version: ${{ steps.version.outputs.new_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,53 +30,36 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - id: bump
-        name: Bump Version
+      - id: version
+        name: Resolve Version
         run: |
-          # Compare versions from HEAD~1 (before this commit) vs HEAD (current)
-          OLD_VERSION=$(git show HEAD~1:main.go 2>/dev/null | grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' || true)
-          NEW_VERSION=$(grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' main.go)
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          CURRENT=$(grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' main.go)
 
-          if [ -z "$OLD_VERSION" ] || [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
-            echo "Version unchanged ($NEW_VERSION). Bumping patch."
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$NEW_VERSION"
-            PATCH=$((PATCH + 1))
-            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-            sed -i "s/serverVersion = \".*\"/serverVersion = \"${NEW_VERSION}\"/" main.go
-            sed -i "s/${OLD_VERSION}/${NEW_VERSION}/g" dashboard.go
-            echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-            # Auto-bumped — commit and tag
-            git add main.go dashboard.go
-            git commit -m "ci: auto bump to ${NEW_VERSION} [nobump]"
-            git tag "v${NEW_VERSION}"
-            git push origin HEAD --follow-tags
-          else
-            echo "Version already bumped: ${OLD_VERSION} → ${NEW_VERSION}"
-            echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-            # Manually bumped — tag the current commit (skip if tag already exists)
-            git tag "v${NEW_VERSION}" 2>/dev/null || echo "Tag v${NEW_VERSION} already exists, skipping"
-            git push origin "v${NEW_VERSION}" 2>/dev/null || echo "Tag already pushed"
+          # [nobump] or [skip]: skip the bump, but still output the current version for docker/release
+          if echo "$COMMIT_MSG" | grep -qE '\[nobump\]|\[skip\]'; then
+            echo "Skipping bump (nobump/skip tag). Current version: $CURRENT"
+            echo "new_version=${CURRENT}" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-      - name: Commit & Tag
-        if: "steps.bump.outputs.new_version != ''"
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          OLD_VERSION=$(git show HEAD:main.go | grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+')
-          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
+          OLD=$(git show HEAD~1:main.go 2>/dev/null | grep -oP 'serverVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' || true)
 
-          if [ "$OLD_VERSION" != "$NEW_VERSION" ]; then
-            git add main.go dashboard.go
-            git commit -m "chore: bump version to ${NEW_VERSION} [nobump]"
-            git tag "v${NEW_VERSION}"
+          if [ -z "$OLD" ] || [ "$OLD" = "$CURRENT" ]; then
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+            PATCH=$((PATCH + 1))
+            NEW="${MAJOR}.${MINOR}.${PATCH}"
+            sed -i "s/serverVersion = \".*\"/serverVersion = \"${NEW}\"/" main.go
+            git add main.go
+            git commit -m "ci: auto bump to ${NEW} [nobump]"
+            git tag "v${NEW}" 2>/dev/null || true
             git push origin HEAD --follow-tags
+            echo "new_version=${NEW}" >> $GITHUB_OUTPUT
           else
-            # Tag current commit if not already tagged
-            if ! git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
-              git tag "v${NEW_VERSION}"
-              git push origin "v${NEW_VERSION}"
-            fi
+            echo "Version manually bumped: ${OLD} → ${CURRENT}"
+            git tag "v${CURRENT}" 2>/dev/null || echo "Tag already exists"
+            git push origin "v${CURRENT}" 2>/dev/null || echo "Tag already pushed"
+            echo "new_version=${CURRENT}" >> $GITHUB_OUTPUT
           fi
 
   docker:
@@ -103,24 +85,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ needs.version.outputs.new_version }}
-            type=raw,value=latest
-            type=sha
-
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.new_version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
