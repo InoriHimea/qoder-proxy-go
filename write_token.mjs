@@ -64,7 +64,7 @@ try {
     
     // Remove self execution
     const tailCode = code.substring(Math.max(0, code.length - 5000));
-    const selfExecRegex = /[a-zA-Z0-9_$]+\(\),[a-zA-Z0-9_$]+\(\),[a-zA-Z0-9_$]+\(\)\.catch/g;
+    const selfExecRegex = /(?:[a-zA-Z0-9_$]+\([^()]*\),)+[a-zA-Z0-9_$]+\(\)\.catch/g;
     const matches = [...tailCode.matchAll(selfExecRegex)];
     if (matches.length === 0) {
         throw new Error('Self-execution pattern not found in bundle');
@@ -104,20 +104,41 @@ try {
         throw new Error('Could not dynamically find User Path Function');
     }
 
-    console.log(`Dynamic Symbols Detected: wasmInit="${wasmInitName}", credClass="${credClassName}", pathFn="${pathFnName}"`);
+    // The credential class and path function live inside an esbuild lazy-init
+    // wrapper (`NAME=M(()=>{...})`) that populates module-level state (base
+    // dirs, endpoint config, etc). Importing the trimmed bundle skips whatever
+    // normally triggers that wrapper, so we detect its name and invoke it
+    // ourselves before touching credClass/pathFn.
+    let lazyInitName = null;
+    if (saveIdx !== -1) {
+        const before = code.substring(Math.max(0, saveIdx - 3000), saveIdx);
+        const wraps = [...before.matchAll(/([a-zA-Z0-9_$]+)=M\(\(\)=>\{/g)];
+        if (wraps.length > 0) lazyInitName = wraps[wraps.length - 1][1];
+    }
+    if (!lazyInitName) {
+        throw new Error('Could not dynamically find lazy-init wrapper for Credential Storage Class');
+    }
+
+    console.log(`Dynamic Symbols Detected: wasmInit="${wasmInitName}", credClass="${credClassName}", pathFn="${pathFnName}", lazyInit="${lazyInitName}"`);
 
     // Create temp file in system tmp directory with exports appended
     const tempFile = path.join(os.tmpdir(), `qodercli_temp_${Date.now()}.mjs`);
-    const tempCode = code.substring(0, index) + `\nexport { ${wasmInitName} as HT, ${credClassName} as fc, ${pathFnName} as eee };\n`;
-    
+    const tempCode = code.substring(0, index) + `\nexport { ${wasmInitName} as HT, ${credClassName} as fc, ${pathFnName} as eee, ${lazyInitName} as lzi };\n`;
+
     fs.writeFileSync(tempFile, tempCode, 'utf8');
     console.log(`Created temp wrapper module at: ${tempFile}`);
-    
+
     // Convert path to file:/// URL for dynamic import on Windows
     const tempFileUri = `file:///${tempFile.replace(/\\/g, '/')}`;
     
     console.log('Importing temp wrapper...');
-    const { HT, fc, eee } = await import(tempFileUri);
+    // NOTE: must use the namespace object and read properties AFTER calling
+    // lzi(), not destructure up front — destructuring snapshots the property
+    // value at that instant, and fc/eee are still undefined until the
+    // lazy-init wrapper (lzi) actually runs and assigns them.
+    const ns = await import(tempFileUri);
+    ns.lzi(); // trigger lazy-init wrapper so module-level state (base dirs, etc) is populated
+    const { HT, fc, eee } = ns;
     
     // Exchange PAT for DT if needed
     let finalToken = token;
