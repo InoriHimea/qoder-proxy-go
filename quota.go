@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/InoriHimea/qoder-proxy-go/wasmsigner"
 )
 
 // QuotaBucket mirrors one usage bucket (plan quota or add-on quota) from the
@@ -39,9 +37,6 @@ type QuotaInfo struct {
 	IsPlanQuotaProrated  bool        `json:"isPlanQuotaProrated"`
 }
 
-const cnQuotaSigPath = "/api/v2/quota/usage"
-const cnQuotaPath = "/algo/api/v2/quota/usage"
-
 // QuotaManager caches the last fetched QuotaInfo per active account to avoid
 // hammering the real backend on every dashboard poll.
 type QuotaManager struct {
@@ -59,7 +54,7 @@ func NewQuotaManager() *QuotaManager {
 // Get returns cached quota info for the currently active account, refetching
 // from the real backend when the cache is stale, force is set, or the active
 // account changed since the last fetch.
-func (qm *QuotaManager) Get(cm *ConfigManager, dc *DirectClient, force bool) (*QuotaInfo, error) {
+func (qm *QuotaManager) Get(cm *ConfigManager, force bool) (*QuotaInfo, error) {
 	cfg := cm.Get()
 	accountKey := cfg.UserID + "|" + cfg.MachineID + "|" + cfg.Token
 
@@ -71,16 +66,11 @@ func (qm *QuotaManager) Get(cm *ConfigManager, dc *DirectClient, force bool) (*Q
 	}
 	qm.mu.Unlock()
 
-	var (
-		info *QuotaInfo
-		err  error
-	)
-	if strings.ToLower(cfg.Backend) == "cn" {
-		info, err = dc.FetchCNQuotaUsage(cfg)
-	} else {
-		oc := NewOAuthClient(cfg.Backend)
-		info, err = oc.GetQuotaUsage(context.Background(), cfg.Token)
-	}
+	// Real desktop client hits openapi.qoder.com.cn with a plain Bearer token
+	// for quota/usage on both backends (confirmed via mitm capture) — the
+	// gateway.*/algo/ signed path is not used for this endpoint.
+	oc := NewOAuthClient(cfg.Backend)
+	info, err := oc.GetQuotaUsage(context.Background(), cfg.Token)
 	if err != nil {
 		return nil, err
 	}
@@ -92,53 +82,6 @@ func (qm *QuotaManager) Get(cm *ConfigManager, dc *DirectClient, force bool) (*Q
 	qm.mu.Unlock()
 
 	return info, nil
-}
-
-// FetchCNQuotaUsage fetches quota/usage via the WASM-signed CN gateway path.
-func (c *DirectClient) FetchCNQuotaUsage(cfg Config) (*QuotaInfo, error) {
-	signer, err := c.getSigner(cfg.MachineID)
-	if err != nil {
-		return nil, err
-	}
-	u := wasmsigner.UserInfo{
-		UID:              cfg.UserID,
-		OrganizationID:   cfg.OrganizationID,
-		OrganizationTags: cfg.OrganizationTags,
-		DataPolicyAgreed: cfg.DataPolicyAgreed,
-	}
-	signed, err := signer.SignRequest(u, cnGatewayHost, cnQuotaPath, "GET", cnQuotaSigPath, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("sign CN quota request: %w", err)
-	}
-
-	hReq, err := http.NewRequest("GET", signed.URL, nil)
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range signed.Headers {
-		hReq.Header.Set(k, v)
-	}
-
-	client := newDirectHTTPClient(cfg)
-	hResp, err := client.Do(hReq)
-	if err != nil {
-		return nil, fmt.Errorf("CN quota request failed: %w", err)
-	}
-	defer hResp.Body.Close()
-
-	body, err := io.ReadAll(hResp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if hResp.StatusCode >= 400 {
-		return nil, fmt.Errorf("CN quota endpoint returned %d: %s", hResp.StatusCode, string(body))
-	}
-
-	var info QuotaInfo
-	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("parse CN quota response: %w", err)
-	}
-	return &info, nil
 }
 
 // GetQuotaUsage fetches quota/usage from the global backend's simple-Bearer

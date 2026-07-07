@@ -166,9 +166,9 @@ func handleRemoveAccount(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 	json.NewEncoder(ctx).Encode(map[string]bool{"ok": true})
 }
 
-func handleQuotaUsage(ctx *fasthttp.RequestCtx, cm *ConfigManager, dc *DirectClient, qm *QuotaManager) {
+func handleQuotaUsage(ctx *fasthttp.RequestCtx, cm *ConfigManager, qm *QuotaManager) {
 	force := string(ctx.QueryArgs().Peek("force")) == "true"
-	info, err := qm.Get(cm, dc, force)
+	info, err := qm.Get(cm, force)
 	if err != nil {
 		ctx.SetStatusCode(http.StatusBadGateway)
 		json.NewEncoder(ctx).Encode(map[string]string{"error": err.Error()})

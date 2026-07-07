@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.6.0"
+const serverVersion = "3.6.1"
 
 func main() {
 	startTime = time.Now()
@@ -194,7 +194,7 @@ func main() {
 		handleRemoveAccount(ctx, cm)
 	})
 	r.GET("/dashboard/api/quota", func(ctx *fasthttp.RequestCtx) {
-		handleQuotaUsage(ctx, cm, dc, qm)
+		handleQuotaUsage(ctx, cm, qm)
 	})
 	r.GET("/dashboard/api/logs", handleGetRequestLogs)
 	r.GET("/dashboard/api/logs/{id}", handleGetRequestLogDetail)
