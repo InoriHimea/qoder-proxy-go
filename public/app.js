@@ -126,6 +126,12 @@ function renderUsage() {
     <div class="page-header"><div><h1 class="page-title">Usage & Credits</h1><p class="page-sub">Local usage tracking for proxy requests</p></div></div>
 
     <div class="card">
+      <div class="card-title">Quota & Credits</div>
+      <div id="quota-info">Loading...</div>
+      <button class="btn btn-ghost" style="margin-top:12px;" onclick="refreshQuota()">Refresh</button>
+    </div>
+
+    <div class="card">
       <div class="card-title">Overview</div>
       <div id="usage-overview">Loading...</div>
       <button class="btn btn-danger" style="margin-top: 15px;" onclick="resetUsage()">Reset Statistics</button>
@@ -137,7 +143,71 @@ function renderUsage() {
     </div>`;
 
   fetchUsage();
+  fetchQuota();
 }
+
+async function fetchQuota() {
+  const area = $('quota-info');
+  if (!area) return;
+  try {
+    const info = await api('/dashboard/api/quota');
+    renderQuotaTo(area, info);
+  } catch (err) {
+    area.innerHTML = `<div class="empty-state">Quota unavailable: ${escHtml(err.message)}</div>`;
+  }
+}
+
+function renderQuotaBucket(label, b) {
+  const total = b.total || 0;
+  const used = b.used || 0;
+  const remaining = b.remaining ?? (total - used);
+  const pct = total > 0 ? (used / total) * 100 : 0;
+  const color = pct > 90 ? '#f87171' : pct > 60 ? '#fbbf24' : '#34d399';
+  return `
+    <div>
+      <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px;">
+        <span>${escHtml(label)}</span>
+        <span>${remaining.toFixed(0)} / ${total.toFixed(0)} ${escHtml(b.unit || 'credits')} left</span>
+      </div>
+      <div style="height:8px; background:var(--elevated); border-radius:4px; overflow:hidden;">
+        <div style="width:${pct}%; height:100%; background:${color}; transition: width 0.3s ease;"></div>
+      </div>
+      <div style="font-size:11px; color:var(--text3); margin-top:3px;">${pct.toFixed(0)}% used</div>
+    </div>`;
+}
+
+function renderQuotaTo(area, info) {
+  const plan = info.userQuota || {};
+  const addOn = info.addOnQuota || {};
+  const pct = info.totalUsagePercentage;
+  let html = '';
+  html += `<div style="display:flex; gap:30px; flex-wrap:wrap;">`;
+  html += renderQuotaBucket('Plan quota', plan);
+  html += renderQuotaBucket('Add-on quota', addOn);
+  html += `</div>`;
+  html += `<div style="margin-top:16px; font-size:13px; color:var(--text2);">`;
+  html += `Overall usage: <strong>${(pct * 100).toFixed(0)}%</strong>`;
+  if (info.isQuotaExceeded) html += ` <span class="status-chip s5xx">Exceeded</span>`;
+  html += ` · User type: <strong>${escHtml(info.userType)}</strong>`;
+  if (info.expiresAt) {
+    const d = new Date(info.expiresAt);
+    html += ` · Expires: <strong>${d.toLocaleString()}</strong>`;
+  }
+  if (info.upgradeUrl) html += ` · <a href="${escHtml(info.upgradeUrl)}" target="_blank" rel="noopener">Upgrade</a>`;
+  html += `</div>`;
+  area.innerHTML = html;
+}
+
+window.refreshQuota = async () => {
+  try {
+    const info = await api('/dashboard/api/quota?force=true');
+    const area = $('quota-info');
+    if (area) renderQuotaTo(area, info);
+    showToast('Quota refreshed');
+  } catch (err) {
+    showToast(`Error refreshing quota: ${err.message}`, 'error');
+  }
+};
 
 async function fetchUsage() {
   try {
@@ -400,6 +470,19 @@ function renderSettings() {
     <div class="page-header"><div><h1 class="page-title">Settings</h1><p class="page-sub">Configure backend, token and model list</p></div></div>
 
     <div class="card">
+      <div class="card-title">Accounts</div>
+      <div class="table-wrap" id="accounts-list">Loading...</div>
+      <div class="add-model-row" style="margin-top:12px;">
+        <input type="text" id="new-acc-name" placeholder="Account name (e.g. work)">
+        <select id="new-acc-backend">
+          <option value="global">Qoder International</option>
+          <option value="cn">Qoder CN</option>
+        </select>
+        <button class="btn btn-sm" onclick="addAccount()">+ Add Account</button>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-title">Core Configuration</div>
       <div class="settings-form">
         <div class="field">
@@ -464,7 +547,86 @@ function renderSettings() {
     </div>`;
   renderModelsTable();
   refreshOAuthStatus();
+  refreshAccounts();
 }
+
+async function refreshAccounts() {
+  const area = $('accounts-list');
+  if (!area) return;
+  try {
+    const { accounts } = await api('/dashboard/api/accounts');
+    if (!accounts || accounts.length === 0) {
+      area.innerHTML = '<div class="empty-state">No accounts.</div>';
+      return;
+    }
+    area.innerHTML = `
+      <table>
+        <thead><tr><th>Name</th><th>Backend</th><th>Token</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${accounts.map(a => `
+            <tr>
+              <td>${escHtml(a.name)}</td>
+              <td><span class="tier-badge">${escHtml(a.backend)}</span></td>
+              <td><code>${a.hasToken ? escHtml(a.maskedToken) : '—'}</code></td>
+              <td>${a.active ? '<span class="status-chip s2xx">Active</span>' : ''}</td>
+              <td>
+                ${a.active ? '' : `<button class="btn-text" onclick="activateAccount('${a.id}')">Set Active</button>`}
+                <button class="btn-text btn-danger" onclick="deleteAccount('${a.id}')">Delete</button>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (err) {
+    area.innerHTML = `<div class="empty-state" style="color:var(--error)">Failed to load accounts: ${escHtml(err.message)}</div>`;
+  }
+}
+
+window.addAccount = async () => {
+  const name = $('new-acc-name').value.trim();
+  const backend = $('new-acc-backend').value;
+  if (!name) return showToast('Account name required', 'error');
+  try {
+    await api('/dashboard/api/accounts', { method: 'POST', body: JSON.stringify({ name, backend }) });
+    showToast('Account added and set active');
+    $('new-acc-name').value = '';
+    const stg = await api('/dashboard/api/settings');
+    state.settings = stg;
+    renderModelsTable();
+    await refreshAccounts();
+    await refreshOAuthStatus();
+  } catch (err) {
+    showToast(`Error adding account: ${err.message}`, 'error');
+  }
+};
+
+window.activateAccount = async (id) => {
+  try {
+    await api(`/dashboard/api/accounts/${id}/activate`, { method: 'POST' });
+    showToast('Active account switched');
+    const stg = await api('/dashboard/api/settings');
+    state.settings = stg;
+    renderModelsTable();
+    await refreshAccounts();
+    await refreshOAuthStatus();
+  } catch (err) {
+    showToast(`Error switching account: ${err.message}`, 'error');
+  }
+};
+
+window.deleteAccount = async (id) => {
+  if (!confirm('Delete this account?')) return;
+  try {
+    await api(`/dashboard/api/accounts/${id}`, { method: 'DELETE' });
+    showToast('Account deleted');
+    const stg = await api('/dashboard/api/settings');
+    state.settings = stg;
+    renderModelsTable();
+    await refreshAccounts();
+    await refreshOAuthStatus();
+  } catch (err) {
+    showToast(`Error deleting account: ${err.message}`, 'error');
+  }
+};
 
 async function refreshOAuthStatus() {
   const line = $('oauth-status-line');

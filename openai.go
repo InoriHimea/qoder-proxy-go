@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
-	"runtime"
-	"os/exec"
 
 	"github.com/valyala/fasthttp"
 )
@@ -357,25 +357,25 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 						chunk := ChatChunk{
 							ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
 						}
-							chunk.Choices = []struct {
-								Index int `json:"index"`
-								Delta struct {
-									Role    string `json:"role,omitempty"`
-									Content string `json:"content,omitempty"`
-								} `json:"delta"`
-								FinishReason *string `json:"finish_reason"`
-							}{
-								{
-									Index: 0,
-								},
-							}
-							chunk.Choices[0].Delta.Content = content
-
-							data, _ := json.Marshal(chunk)
-							fmt.Fprintf(w, "data: %s\n\n", data)
-							w.Flush()
+						chunk.Choices = []struct {
+							Index int `json:"index"`
+							Delta struct {
+								Role    string `json:"role,omitempty"`
+								Content string `json:"content,omitempty"`
+							} `json:"delta"`
+							FinishReason *string `json:"finish_reason"`
+						}{
+							{
+								Index: 0,
+							},
 						}
+						chunk.Choices[0].Delta.Content = content
+
+						data, _ := json.Marshal(chunk)
+						fmt.Fprintf(w, "data: %s\n\n", data)
+						w.Flush()
 					}
+				}
 			}
 		}
 
@@ -470,11 +470,11 @@ func handleModelsRefresh(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 		ctx.Error(fmt.Sprintf("Failed to run qoderclicn: %v", err), 500)
 		return
 	}
-	
+
 	lines := strings.Split(string(out), "\n")
 	var newModels []Model
 	seen := make(map[string]bool)
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || line == "MODEL" || strings.Contains(line, "Warning:") {
@@ -487,20 +487,19 @@ func handleModelsRefresh(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 				tier = "free"
 			}
 			newModels = append(newModels, Model{
-				ID: line,
-				Label: line,
-				Tier: tier,
+				ID:          line,
+				Label:       line,
+				Tier:        tier,
 				Description: "Auto-detected model",
 			})
 		}
 	}
-	
+
 	if len(newModels) > 0 {
 		cfg := cm.Get()
 		cfg.Models = newModels
 		cm.Update(cfg)
 	}
-	
+
 	json.NewEncoder(ctx).Encode(map[string]interface{}{"ok": true, "models": newModels})
 }
-

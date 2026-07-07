@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.5.0"
+const serverVersion = "3.6.0"
 
 func main() {
 	startTime = time.Now()
@@ -39,6 +39,7 @@ func main() {
 	}
 
 	dc := NewDirectClient(cm)
+	qm := NewQuotaManager()
 
 	r := router.New()
 
@@ -179,6 +180,21 @@ func main() {
 	})
 	r.GET("/dashboard/api/oauth/status", func(ctx *fasthttp.RequestCtx) {
 		handleOAuthStatus(ctx, cm)
+	})
+	r.GET("/dashboard/api/accounts", func(ctx *fasthttp.RequestCtx) {
+		handleListAccounts(ctx, cm)
+	})
+	r.POST("/dashboard/api/accounts", func(ctx *fasthttp.RequestCtx) {
+		handleAddAccount(ctx, cm)
+	})
+	r.POST("/dashboard/api/accounts/{id}/activate", func(ctx *fasthttp.RequestCtx) {
+		handleActivateAccount(ctx, cm)
+	})
+	r.DELETE("/dashboard/api/accounts/{id}", func(ctx *fasthttp.RequestCtx) {
+		handleRemoveAccount(ctx, cm)
+	})
+	r.GET("/dashboard/api/quota", func(ctx *fasthttp.RequestCtx) {
+		handleQuotaUsage(ctx, cm, dc, qm)
 	})
 	r.GET("/dashboard/api/logs", handleGetRequestLogs)
 	r.GET("/dashboard/api/logs/{id}", handleGetRequestLogDetail)

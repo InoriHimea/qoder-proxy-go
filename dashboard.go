@@ -14,14 +14,7 @@ import (
 func handleGetSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 	cfg := cm.Get()
 
-	maskedToken := ""
-	if cfg.Token != "" {
-		if len(cfg.Token) > 8 {
-			maskedToken = cfg.Token[:6] + "..." + cfg.Token[len(cfg.Token)-4:]
-		} else {
-			maskedToken = "******"
-		}
-	}
+	maskedToken := maskToken(cfg.Token)
 
 	resp := map[string]interface{}{
 		"backend":      cfg.Backend,
@@ -47,18 +40,15 @@ func handlePostSettings(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 		return
 	}
 
-	current := cm.Get()
-	next := Config{
-		Backend:      input.Backend,
-		Token:        input.Token,
-		UseDirectAPI: input.UseDirectApi,
-		ProxyURL:     input.ProxyUrl,
-		Models:       input.Models,
-	}
+	next := cm.Get()
+	next.Backend = input.Backend
+	next.UseDirectAPI = input.UseDirectApi
+	next.ProxyURL = input.ProxyUrl
+	next.Models = input.Models
 
 	// Logic to avoid overwriting with masked token
-	if strings.Contains(input.Token, "...") || input.Token == "******" || input.Token == "" {
-		next.Token = current.Token
+	if !strings.Contains(input.Token, "...") && input.Token != "******" && input.Token != "" {
+		next.Token = input.Token
 	}
 
 	if err := cm.Update(next); err != nil {
@@ -97,10 +87,10 @@ func handleOAuthStatus(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 	cfg := cm.Get()
 
 	resp := map[string]interface{}{
-		"tokenType":     "",
-		"userID":        cfg.UserID,
-		"expireTime":    cfg.ExpireTime,
-		"hasRefresh":    cfg.RefreshToken != "",
+		"tokenType":  "",
+		"userID":     cfg.UserID,
+		"expireTime": cfg.ExpireTime,
+		"hasRefresh": cfg.RefreshToken != "",
 	}
 
 	if cfg.Token == "" {
@@ -126,4 +116,63 @@ func handleUsageLocal(ctx *fasthttp.RequestCtx, um *UsageManager) {
 func handleUsageReset(ctx *fasthttp.RequestCtx, um *UsageManager) {
 	um.Reset()
 	json.NewEncoder(ctx).Encode(map[string]bool{"ok": true})
+}
+
+func handleListAccounts(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	json.NewEncoder(ctx).Encode(map[string]interface{}{
+		"accounts": cm.ListAccounts(),
+	})
+}
+
+func handleAddAccount(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	var input struct {
+		Name    string `json:"name"`
+		Backend string `json:"backend"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &input); err != nil {
+		ctx.Error("Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if input.Name == "" {
+		ctx.Error("name is required", http.StatusBadRequest)
+		return
+	}
+	if input.Backend == "" {
+		input.Backend = "global"
+	}
+	summary, err := cm.AddAccount(input.Name, input.Backend)
+	if err != nil {
+		ctx.Error(err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(ctx).Encode(summary)
+}
+
+func handleActivateAccount(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	id, _ := ctx.UserValue("id").(string)
+	if err := cm.SetActiveAccount(id); err != nil {
+		ctx.Error(err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(ctx).Encode(map[string]bool{"ok": true})
+}
+
+func handleRemoveAccount(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	id, _ := ctx.UserValue("id").(string)
+	if err := cm.RemoveAccount(id); err != nil {
+		ctx.Error(err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(ctx).Encode(map[string]bool{"ok": true})
+}
+
+func handleQuotaUsage(ctx *fasthttp.RequestCtx, cm *ConfigManager, dc *DirectClient, qm *QuotaManager) {
+	force := string(ctx.QueryArgs().Peek("force")) == "true"
+	info, err := qm.Get(cm, dc, force)
+	if err != nil {
+		ctx.SetStatusCode(http.StatusBadGateway)
+		json.NewEncoder(ctx).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(ctx).Encode(info)
 }
