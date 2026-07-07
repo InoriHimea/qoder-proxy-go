@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.4.4"
+const serverVersion = "3.5.0"
 
 func main() {
 	startTime = time.Now()
@@ -79,6 +79,13 @@ func main() {
 			if result.ExpireTime != 0 {
 				cfg.ExpireTime = result.ExpireTime
 			}
+			if result.OrganizationID != "" {
+				cfg.OrganizationID = result.OrganizationID
+			}
+			if result.OrganizationTags != nil {
+				cfg.OrganizationTags = result.OrganizationTags
+			}
+			cfg.DataPolicyAgreed = result.DataPolicyAgreed
 			if err := cm.Update(cfg); err != nil {
 				AddSystemLog(fmt.Sprintf("Failed to persist OAuth login token: %v", err), "error", "oauth")
 			} else {
@@ -88,15 +95,15 @@ func main() {
 		json.NewEncoder(ctx).Encode(result)
 	})
 	r.DELETE("/oauth/logout", func(ctx *fasthttp.RequestCtx) {
-		cm.Update(Config{
-			Backend:      cm.Get().Backend,
-			Token:        "",
-			ProxyURL:     cm.Get().ProxyURL,
-			Models:       cm.Get().Models,
-			UserID:       "",
-			RefreshToken: "",
-			ExpireTime:   0,
-		})
+		cfg := cm.Get()
+		cfg.Token = ""
+		cfg.UserID = ""
+		cfg.RefreshToken = ""
+		cfg.ExpireTime = 0
+		cfg.OrganizationID = ""
+		cfg.OrganizationTags = nil
+		cfg.DataPolicyAgreed = false
+		cm.Update(cfg)
 		json.NewEncoder(ctx).Encode(map[string]interface{}{"ok": true, "message": "OAuth token cleared"})
 	})
 

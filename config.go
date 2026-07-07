@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 type Model struct {
@@ -24,6 +26,12 @@ type Config struct {
 	UserID       string `json:"user_id,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpireTime   int64  `json:"expire_time,omitempty"`
+	OrganizationID   string   `json:"organization_id,omitempty"`
+	OrganizationTags []string `json:"organization_tags,omitempty"`
+	DataPolicyAgreed bool     `json:"data_policy_agreed,omitempty"`
+	// MachineID is a persisted per-install UUID fed into the WASM signer's
+	// machineId parameter (mirrors the Qoder client's device identity).
+	MachineID string `json:"machine_id,omitempty"`
 }
 
 var DefaultModels = []Model{
@@ -65,9 +73,10 @@ func (cm *ConfigManager) Load() error {
 	if _, err := os.Stat(cm.path); os.IsNotExist(err) {
 		// Init with env vars or defaults
 		cm.cfg = Config{
-			Backend: getEnv("CLI_BACKEND", "global"),
-			Token:   getEnv("QODERCN_PERSONAL_ACCESS_TOKEN", getEnv("QODER_PERSONAL_ACCESS_TOKEN", getEnv("QODER_API_KEY", ""))),
-			Models:  DefaultModels,
+			Backend:   getEnv("CLI_BACKEND", "global"),
+			Token:     getEnv("QODERCN_PERSONAL_ACCESS_TOKEN", getEnv("QODER_PERSONAL_ACCESS_TOKEN", getEnv("QODER_API_KEY", ""))),
+			Models:    DefaultModels,
+			MachineID: uuid.New().String(),
 		}
 		return cm.saveNoLock()
 	}
@@ -76,7 +85,14 @@ func (cm *ConfigManager) Load() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &cm.cfg)
+	if err := json.Unmarshal(data, &cm.cfg); err != nil {
+		return err
+	}
+	if cm.cfg.MachineID == "" {
+		cm.cfg.MachineID = uuid.New().String()
+		return cm.saveNoLock()
+	}
+	return nil
 }
 
 func (cm *ConfigManager) Get() Config {

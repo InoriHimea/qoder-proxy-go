@@ -14,11 +14,13 @@ import (
 )
 
 type ChatRequest struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	Stream          bool      `json:"stream"`
-	MaxTokens       int       `json:"max_tokens"`
-	ReasoningEffort string    `json:"reasoning_effort"`
+	Model           string          `json:"model"`
+	Messages        []Message       `json:"messages"`
+	Stream          bool            `json:"stream"`
+	MaxTokens       int             `json:"max_tokens"`
+	ReasoningEffort string          `json:"reasoning_effort"`
+	Tools           json.RawMessage `json:"tools,omitempty"`
+	ToolChoice      interface{}     `json:"tool_choice,omitempty"`
 }
 
 type Message struct {

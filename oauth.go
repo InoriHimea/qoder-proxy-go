@@ -32,6 +32,9 @@ type OAuthResult struct {
   RefreshToken string `json:"refresh_token"`
   UserID       string `json:"user_id"`
   ExpireTime   int64  `json:"expire_time"`
+  OrganizationID   string   `json:"organization_id,omitempty"`
+  OrganizationTags []string `json:"organization_tags,omitempty"`
+  DataPolicyAgreed bool     `json:"data_policy_agreed,omitempty"`
   Error        string `json:"error,omitempty"`
 }
 
@@ -230,19 +233,45 @@ func (c *OAuthClient) GetUserInfo(ctx context.Context, token string) (*OAuthResu
   defer resp.Body.Close()
 
   var result struct {
-    ID         string `json:"id"`
-    Name       string `json:"name"`
-    Email      string `json:"email"`
-    ExpireTime int64  `json:"expire_time"`
+    ID               string   `json:"id"`
+    UserID           string   `json:"user_id"`
+    UID              string   `json:"uid"`
+    Name             string   `json:"name"`
+    Email            string   `json:"email"`
+    ExpireTime       int64    `json:"expire_time"`
+    OrganizationID   string   `json:"organization_id"`
+    OrgID            string   `json:"orgId"`
+    OrganizationIDCC string   `json:"organizationId"`
+    OrganizationTags []string `json:"organization_tags"`
+    DataPolicyAgreed bool     `json:"data_policy_agreed"`
   }
 
   if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
     return nil, err
   }
 
+  uid := result.ID
+  if uid == "" {
+    uid = result.UserID
+  }
+  if uid == "" {
+    uid = result.UID
+  }
+
+  orgID := result.OrganizationID
+  if orgID == "" {
+    orgID = result.OrgID
+  }
+  if orgID == "" {
+    orgID = result.OrganizationIDCC
+  }
+
   return &OAuthResult{
-    UserID:     result.ID,
-    ExpireTime: result.ExpireTime,
+    UserID:           uid,
+    ExpireTime:       result.ExpireTime,
+    OrganizationID:   orgID,
+    OrganizationTags: result.OrganizationTags,
+    DataPolicyAgreed: result.DataPolicyAgreed,
   }, nil
 }
 
@@ -279,6 +308,9 @@ func (c *OAuthClient) CreateLoginSession() (string, string, error) {
       if userInfo, err := c.GetUserInfo(ctx, result.Token); err == nil {
         result.UserID = userInfo.UserID
         result.ExpireTime = userInfo.ExpireTime
+        result.OrganizationID = userInfo.OrganizationID
+        result.OrganizationTags = userInfo.OrganizationTags
+        result.DataPolicyAgreed = userInfo.DataPolicyAgreed
       }
       session.ResultChan <- *result
     }

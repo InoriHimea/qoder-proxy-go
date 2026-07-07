@@ -11,15 +11,25 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/InoriHimea/qoder-proxy-go/wasmsigner"
+	"github.com/google/uuid"
 	"github.com/valyala/fasthttp"
 )
 
+// cnGatewayHost is the bare-host endpoint the CN legacy transport signs
+// requests against; the WASM signer appends the inference path itself.
+const cnGatewayHost = "https://gateway.qoder.com.cn"
+
 type DirectClient struct {
 	Config *ConfigManager
+
+	signerMu sync.Mutex
+	signer   *wasmsigner.Signer
 }
 
 func NewDirectClient(cm *ConfigManager) *DirectClient {
@@ -212,16 +222,50 @@ func (c *DirectClient) refreshDeviceTokenViaOAuth(currentDT, backend, refreshTok
 	return newToken
 }
 
+// newDirectHTTPClient builds the shared http.Client used for both the
+// non-CN bearer-token transport and the CN signed-gateway transport.
+func newDirectHTTPClient(cfg Config) *http.Client {
+	proxyFunc := http.ProxyFromEnvironment
+	if cfg.ProxyURL != "" {
+		if pURL, err := url.Parse(cfg.ProxyURL); err == nil {
+			proxyFunc = http.ProxyURL(pURL)
+		} else {
+			AddSystemLog(fmt.Sprintf("Invalid custom ProxyURL '%s': %v. Falling back to env.", cfg.ProxyURL, err), "warn", "direct")
+		}
+	}
+
+	return &http.Client{
+		Timeout: 15 * time.Minute,
+		Transport: &http.Transport{
+			Proxy:               proxyFunc,
+			TLSHandshakeTimeout: 30 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		},
+	}
+}
+
 func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager) bool {
 	started := time.Now()
 	cfg := c.Config.Get()
 
-	baseURL := "https://api2-v2.qoder.sh"
 	if strings.ToLower(cfg.Backend) == "cn" {
-		// CN backend uses the same API host — only the token exchange endpoint differs
-		baseURL = "https://api2-v2.qoder.sh"
+		if req.Stream {
+			return c.handleStreamCN(ctx, req, um, started)
+		}
+		return c.handleChatCN(ctx, req, um, started)
 	}
 
+	baseURL := "https://api2-v2.qoder.sh"
 	reqURL := baseURL + "/model/v1/chat/completions"
 
 	body, _ := json.Marshal(req)
@@ -245,33 +289,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	hReq.Header.Set("Cosy-ClientType", "5")
 	hReq.Header.Set("Cosy-MachineOS", "x86_64_win32")
 
-	proxyFunc := http.ProxyFromEnvironment
-	if cfg.ProxyURL != "" {
-		if pURL, err := url.Parse(cfg.ProxyURL); err == nil {
-			proxyFunc = http.ProxyURL(pURL)
-		} else {
-			AddSystemLog(fmt.Sprintf("Invalid custom ProxyURL '%s': %v. Falling back to env.", cfg.ProxyURL, err), "warn", "direct")
-		}
-	}
-
-	client := &http.Client{
-		Timeout: 15 * time.Minute,
-		Transport: &http.Transport{
-			Proxy:               proxyFunc,
-			TLSHandshakeTimeout: 30 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		},
-	}
+	client := newDirectHTTPClient(cfg)
 
 	hResp, err := client.Do(hReq)
 	if err != nil {
@@ -353,12 +371,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, body []byte, req ChatRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
 
-	baseURL := "https://api2-v2.qoder.sh"
-	if strings.ToLower(cfg.Backend) == "cn" {
-		baseURL = "https://api2-v2.qoder.sh"
-	}
-
-	streamURL := baseURL + "/model/v1/chat/completions"
+	streamURL := reqURL
 
 	hReq, err := http.NewRequest("POST", streamURL, bytes.NewReader(body))
 	if err != nil {
@@ -378,33 +391,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 	hReq.Header.Set("Cache-Control", "no-cache")
 	hReq.Header.Set("Connection", "keep-alive")
 
-	proxyFunc := http.ProxyFromEnvironment
-	if cfg.ProxyURL != "" {
-		if pURL, err := url.Parse(cfg.ProxyURL); err == nil {
-			proxyFunc = http.ProxyURL(pURL)
-		} else {
-			AddSystemLog(fmt.Sprintf("Invalid custom ProxyURL '%s': %v. Falling back to env.", cfg.ProxyURL, err), "warn", "direct")
-		}
-	}
-
-	client := &http.Client{
-		Timeout: 15 * time.Minute,
-		Transport: &http.Transport{
-			Proxy:               proxyFunc,
-			TLSHandshakeTimeout: 30 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		},
-	}
+	client := newDirectHTTPClient(cfg)
 
 	hResp, err := client.Do(hReq)
 	if err != nil {
@@ -488,4 +475,445 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 	})
 
 	return false
+}
+
+// ── CN legacy gateway transport (wasmsigner-signed) ─────────────────────────
+
+// getSigner lazily creates the long-lived WASM signer bound to this
+// install's machine ID. The signer's internal QoderContext is rebuilt only
+// when the signed-for user identity changes (see wasmsigner.Signer).
+func (c *DirectClient) getSigner(machineID string) (*wasmsigner.Signer, error) {
+	c.signerMu.Lock()
+	defer c.signerMu.Unlock()
+	if c.signer != nil {
+		return c.signer, nil
+	}
+	s, err := wasmsigner.New(machineID)
+	if err != nil {
+		return nil, err
+	}
+	c.signer = s
+	return s, nil
+}
+
+// buildCNRequestBody maps an incoming ChatRequest into the snake_case body
+// shape the CN legacy gateway expects (mirrors the JS bundle's xdA()).
+// Note: the real client always sends stream:true on this transport even
+// for "non-streaming" callers — the proxy internally aggregates the SSE
+// response when the caller didn't ask for a stream.
+func buildCNRequestBody(req ChatRequest, cfg Config) (bodyJSON []byte, modelKey string, source string, err error) {
+	requestID := uuid.New().String()
+	sessionID := uuid.New().String()
+
+	var sysSb strings.Builder
+	var msgs []map[string]interface{}
+	lastUserContent := ""
+	for _, m := range req.Messages {
+		content := extractContentText(m.Content)
+		if strings.ToLower(m.Role) == "system" {
+			if content != "" {
+				sysSb.WriteString(content + "\n\n")
+			}
+			continue
+		}
+		msgs = append(msgs, map[string]interface{}{"role": m.Role, "content": content})
+		if strings.ToLower(m.Role) == "user" {
+			lastUserContent = content
+		}
+	}
+	sysText := strings.TrimSpace(sysSb.String())
+	if sysText != "" {
+		msgs = append([]map[string]interface{}{{"role": "system", "content": sysText}}, msgs...)
+	}
+
+	var modelDesc string
+	for _, m := range cfg.Models {
+		if m.ID == req.Model {
+			modelDesc = m.Description
+			break
+		}
+	}
+	isReasoning := req.ReasoningEffort != "" || strings.Contains(strings.ToLower(modelDesc), "reasoning")
+
+	modelConfig := map[string]interface{}{
+		"key":              req.Model,
+		"display_name":     req.Model,
+		"model":            "",
+		"format":           "openai",
+		"is_vl":            false,
+		"is_reasoning":     isReasoning,
+		"api_key":          "",
+		"url":              "",
+		"source":           "system",
+		"max_input_tokens": 128000,
+	}
+
+	maxTokens := req.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = 8192
+	}
+	parameters := map[string]interface{}{"max_tokens": maxTokens}
+	if isReasoning && req.ReasoningEffort != "" {
+		parameters["reasoning_effort"] = req.ReasoningEffort
+	}
+	if req.ToolChoice != nil {
+		parameters["tool_choice"] = req.ToolChoice
+	}
+
+	var tools interface{} = []interface{}{}
+	if len(req.Tools) > 0 {
+		var t interface{}
+		if jsonErr := json.Unmarshal(req.Tools, &t); jsonErr == nil {
+			tools = t
+		}
+	}
+
+	chatContext := map[string]interface{}{
+		"text":     lastUserContent,
+		"features": []interface{}{},
+		"extra": map[string]interface{}{
+			"context":         []interface{}{},
+			"modelConfig":     map[string]interface{}{"key": req.Model, "is_reasoning": isReasoning},
+			"originalContent": lastUserContent,
+		},
+		"chatPrompt": "",
+		"imageUrls":  nil,
+	}
+
+	body := map[string]interface{}{
+		"request_id":       requestID,
+		"request_set_id":   requestID,
+		"chat_record_id":   requestID,
+		"session_id":       sessionID,
+		"stream":           true,
+		"chat_task":        "FREE_INPUT",
+		"chat_context":     chatContext,
+		"is_reply":         true,
+		"is_retry":         false,
+		"source":           1,
+		"version":          "3",
+		"agent_id":         "agent_common",
+		"task_id":          "common",
+		"session_type":     "",
+		"aliyun_user_type": "",
+		"model_config":     modelConfig,
+		"custom_model":     nil,
+		"system":           sysText,
+		"messages":         msgs,
+		"tools":            tools,
+		"parameters":       parameters,
+	}
+
+	bodyJSON, err = json.Marshal(body)
+	return bodyJSON, req.Model, "system", err
+}
+
+// signCNRequest signs bodyJSON for the CN gateway using the persisted user
+// identity in cfg.
+func (c *DirectClient) signCNRequest(cfg Config, bodyJSON []byte, modelKey, source string) (*wasmsigner.SignedRequest, error) {
+	signer, err := c.getSigner(cfg.MachineID)
+	if err != nil {
+		return nil, err
+	}
+	u := wasmsigner.UserInfo{
+		UID:              cfg.UserID,
+		OrganizationID:   cfg.OrganizationID,
+		OrganizationTags: cfg.OrganizationTags,
+		DataPolicyAgreed: cfg.DataPolicyAgreed,
+	}
+	return signer.SignInferRequest(u, cnGatewayHost, string(bodyJSON), &modelKey, &source)
+}
+
+// refreshCNIdentity re-fetches org/user info from the OpenAPI host (if a
+// token is available) and invalidates the signer's cached QoderContext so
+// the next sign rebuilds it from fresh identity fields.
+func (c *DirectClient) refreshCNIdentity(cfg Config) Config {
+	if signer, err := c.getSigner(cfg.MachineID); err == nil {
+		signer.Invalidate()
+	}
+	if cfg.Token != "" {
+		oc := NewOAuthClient(cfg.Backend)
+		ctxTO, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if info, err := oc.GetUserInfo(ctxTO, cfg.Token); err == nil {
+			if info.OrganizationID != "" {
+				cfg.OrganizationID = info.OrganizationID
+			}
+			if info.OrganizationTags != nil {
+				cfg.OrganizationTags = info.OrganizationTags
+			}
+			cfg.DataPolicyAgreed = info.DataPolicyAgreed
+			c.Config.Update(cfg)
+		} else {
+			AddSystemLog(fmt.Sprintf("CN identity refresh failed: %v", err), "warn", "direct")
+		}
+	}
+	return cfg
+}
+
+// sendCNRequest signs and POSTs bodyJSON to the CN gateway, re-signing and
+// retrying once on 401/403 (mirrors QEn()'s force-refresh-then-resign loop).
+func (c *DirectClient) sendCNRequest(cfg Config, bodyJSON []byte, modelKey, source string) (*http.Response, error) {
+	client := newDirectHTTPClient(cfg)
+
+	doOnce := func(cfg Config) (*http.Response, error) {
+		signed, err := c.signCNRequest(cfg, bodyJSON, modelKey, source)
+		if err != nil {
+			return nil, fmt.Errorf("sign CN request: %w", err)
+		}
+		hReq, err := http.NewRequest("POST", signed.URL, strings.NewReader(signed.Body))
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range signed.Headers {
+			hReq.Header.Set(k, v)
+		}
+		hReq.Header.Set("Accept", "text/event-stream")
+		return client.Do(hReq)
+	}
+
+	hResp, err := doOnce(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 403 {
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("CN gateway returned %d, refreshing identity and re-signing", hResp.StatusCode), "warn", "direct")
+		cfg = c.refreshCNIdentity(cfg)
+		hResp, err = doOnce(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return hResp, nil
+}
+
+// cnSSEEnvelope matches the error-path SSE payload shape from the JS
+// bundle's xO(): {statusCodeValue, statusCode, body}. Success-path chunks
+// are NOT enveloped and arrive as plain OpenAI-shape JSON.
+type cnSSEEnvelope struct {
+	StatusCodeValue *float64 `json:"statusCodeValue"`
+	StatusCode      int      `json:"statusCode"`
+	Body            string   `json:"body"`
+}
+
+func isCNSSESentinel(data string) bool {
+	return data == "[DONE]" || data == "[NOT_EXCEED_QUOTA]" ||
+		strings.HasPrefix(data, "[EXCEED_QUOTA]") || strings.HasPrefix(data, "[NOTIFICATIONS]")
+}
+
+// parseCNSSELine inspects one SSE "data:" payload. If it is a non-200
+// error envelope, ok=false and errMsg/errStatus describe the failure.
+// Otherwise chunk is the (already-unwrapped) chunk JSON to forward/parse,
+// or nil if the line was a sentinel/no-op.
+func parseCNSSELine(data string) (chunk []byte, done bool, errMsg string, errStatus int) {
+	if isCNSSESentinel(data) {
+		return nil, true, "", 0
+	}
+	var env cnSSEEnvelope
+	if err := json.Unmarshal([]byte(data), &env); err == nil && env.StatusCodeValue != nil {
+		if int(*env.StatusCodeValue) != 200 {
+			return nil, false, env.Body, int(*env.StatusCodeValue)
+		}
+		body := strings.TrimSpace(env.Body)
+		if body == "" || isCNSSESentinel(body) {
+			return nil, false, "", 0
+		}
+		return []byte(body), false, "", 0
+	}
+	return []byte(data), false, "", 0
+}
+
+func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager, started time.Time) bool {
+	cfg := c.Config.Get()
+
+	bodyJSON, modelKey, source, err := buildCNRequestBody(req, cfg)
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Failed to build CN request body: %v", err), http.StatusInternalServerError)
+		return false
+	}
+
+	hResp, err := c.sendCNRequest(cfg, bodyJSON, modelKey, source)
+	if err != nil {
+		AddSystemLog(fmt.Sprintf("CN gateway request failed: %v", err), "error", "direct")
+		return true
+	}
+	defer hResp.Body.Close()
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 403 {
+		AddSystemLog(fmt.Sprintf("CN gateway still returned %d after resign retry, falling back to CLI", hResp.StatusCode), "warn", "direct")
+		return true
+	}
+	if hResp.StatusCode >= 400 {
+		b, _ := io.ReadAll(hResp.Body)
+		AddSystemLog(fmt.Sprintf("CN gateway returned %d: %s", hResp.StatusCode, string(b)), "warn", "direct")
+		return true
+	}
+
+	scanner := bufio.NewScanner(hResp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var contentBuilder strings.Builder
+	model := req.Model
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
+		if done {
+			break
+		}
+		if errMsg != "" {
+			AddSystemLog(fmt.Sprintf("CN gateway SSE error (status %d): %s", errStatus, errMsg), "error", "direct")
+			ctx.Error(fmt.Sprintf("CN gateway error: %s", errMsg), http.StatusBadGateway)
+			return false
+		}
+		if chunkJSON == nil {
+			continue
+		}
+		var chunk ChatChunk
+		if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
+			if chunk.Model != "" {
+				model = chunk.Model
+			}
+			for _, choice := range chunk.Choices {
+				contentBuilder.WriteString(choice.Delta.Content)
+			}
+		}
+	}
+
+	finalContent := contentBuilder.String()
+	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	resp := map[string]interface{}{
+		"id":      id,
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   model,
+		"choices": []map[string]interface{}{
+			{
+				"index":         0,
+				"message":       map[string]interface{}{"role": "assistant", "content": finalContent},
+				"finish_reason": "stop",
+			},
+		},
+	}
+	respBody, _ := json.Marshal(resp)
+	ctx.SetStatusCode(http.StatusOK)
+	ctx.SetContentType("application/json")
+	ctx.SetBody(respBody)
+
+	sys, prompt := extractSystemAndPrompt(req.Messages)
+	um.Record(req.Model, len(sys)+len(prompt), len(finalContent), false, time.Since(started).Milliseconds())
+	return false
+}
+
+func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager, started time.Time) bool {
+	cfg := c.Config.Get()
+
+	bodyJSON, modelKey, source, err := buildCNRequestBody(req, cfg)
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Failed to build CN request body: %v", err), http.StatusInternalServerError)
+		return false
+	}
+
+	hResp, err := c.sendCNRequest(cfg, bodyJSON, modelKey, source)
+	if err != nil {
+		AddSystemLog(fmt.Sprintf("CN gateway stream request failed: %v", err), "error", "direct")
+		return true
+	}
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 403 {
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("CN gateway stream still returned %d after resign retry, falling back to CLI", hResp.StatusCode), "warn", "direct")
+		return true
+	}
+	if hResp.StatusCode >= 400 {
+		b, _ := io.ReadAll(hResp.Body)
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("CN gateway stream returned %d: %s", hResp.StatusCode, string(b)), "warn", "direct")
+		return true
+	}
+
+	ctx.SetContentType("text/event-stream")
+	ctx.Response.Header.Set("Cache-Control", "no-cache")
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
+	ctx.SetStatusCode(http.StatusOK)
+
+	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer hResp.Body.Close()
+
+		scanner := bufio.NewScanner(hResp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+		var fullContent strings.Builder
+		outLen := 0
+		streamErr := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
+			if done {
+				break
+			}
+			if errMsg != "" {
+				AddSystemLog(fmt.Sprintf("CN gateway SSE error (status %d): %s", errStatus, errMsg), "error", "direct")
+				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{
+					"error": map[string]interface{}{"message": errMsg, "code": errStatus},
+				}))
+				w.Flush()
+				streamErr = true
+				break
+			}
+			if chunkJSON == nil {
+				continue
+			}
+			outLen += len(chunkJSON)
+			var chunk ChatChunk
+			if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
+				for _, choice := range chunk.Choices {
+					fullContent.WriteString(choice.Delta.Content)
+				}
+			}
+			if _, werr := w.Write([]byte("data: ")); werr != nil {
+				return
+			}
+			if _, werr := w.Write(chunkJSON); werr != nil {
+				return
+			}
+			if _, werr := w.Write([]byte("\n\n")); werr != nil {
+				return
+			}
+			w.Flush()
+		}
+
+		if !streamErr {
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			w.Flush()
+		}
+
+		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+			UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
+		}
+
+		sys, prompt := extractSystemAndPrompt(req.Messages)
+		um.Record(req.Model, len(sys)+len(prompt), outLen/50, false, time.Since(started).Milliseconds())
+	})
+
+	return false
+}
+
+func mustJSON(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return strconv.Quote(err.Error())
+	}
+	return string(b)
 }

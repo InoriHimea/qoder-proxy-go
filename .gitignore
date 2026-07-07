@@ -6,3 +6,6 @@ logs.json
 test_payload.json
 find_domains.js
 intercept.js
+mitm-capture/
+*.exe
+qodercn-jetbrains-latest.zip
