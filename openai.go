@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -28,19 +29,35 @@ type Message struct {
 	Content interface{} `json:"content"`
 }
 
+type ChatChunkDelta struct {
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+type ChatChunkChoice struct {
+	Index int            `json:"index"`
+	Delta ChatChunkDelta `json:"delta"`
+	// Message is populated instead of Delta on some CN gateway chunks
+	// (mirrors the real client's `delta ?? message` fallback).
+	Message      ChatChunkDelta `json:"message"`
+	FinishReason *string        `json:"finish_reason"`
+}
+
+// Content returns the choice's text, preferring Delta.Content and falling
+// back to Message.Content (CN gateway sends either shape).
+func (c ChatChunkChoice) Content() string {
+	if c.Delta.Content != "" {
+		return c.Delta.Content
+	}
+	return c.Message.Content
+}
+
 type ChatChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index int `json:"index"`
-		Delta struct {
-			Role    string `json:"role,omitempty"`
-			Content string `json:"content,omitempty"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	} `json:"choices"`
+	ID      string            `json:"id"`
+	Object  string            `json:"object"`
+	Created int64             `json:"created"`
+	Model   string            `json:"model"`
+	Choices []ChatChunkChoice `json:"choices"`
 }
 
 func extractContentText(content interface{}) string {
@@ -357,18 +374,7 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 						chunk := ChatChunk{
 							ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
 						}
-						chunk.Choices = []struct {
-							Index int `json:"index"`
-							Delta struct {
-								Role    string `json:"role,omitempty"`
-								Content string `json:"content,omitempty"`
-							} `json:"delta"`
-							FinishReason *string `json:"finish_reason"`
-						}{
-							{
-								Index: 0,
-							},
-						}
+						chunk.Choices = []ChatChunkChoice{{Index: 0}}
 						chunk.Choices[0].Delta.Content = content
 
 						data, _ := json.Marshal(chunk)
@@ -457,17 +463,36 @@ func extractSystemAndPrompt(messages []Message) (string, string) {
 }
 
 func handleModelsRefresh(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
+	cfg := cm.Get()
 	binaryName := "qodercli"
-	if strings.ToLower(cm.Get().Backend) == "cn" {
+	backendName := "global"
+	if strings.ToLower(cfg.Backend) == "cn" {
 		binaryName = "qoderclicn"
+		backendName = "cn"
 	}
 	cmdPath := binaryName
 	if runtime.GOOS == "windows" {
 		cmdPath = binaryName + ".cmd"
 	}
-	out, err := exec.Command(cmdPath, "chat", "--list-models").Output()
+
+	if cfg.Token != "" {
+		if err := writeDeviceTokenToKeychain(cfg.Token, cfg.UserID, cfg.RefreshToken, cfg.ExpireTime, backendName); err != nil {
+			AddSystemLog(fmt.Sprintf("Failed to write device token before models refresh: %v", err), "error", "spawn")
+		}
+	}
+
+	cmd := exec.Command(cmdPath, "chat", "--list-models")
+	cmd.Dir = os.TempDir()
+	cmd.Env = os.Environ()
+	if cfg.Token != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("QODER_API_KEY=%s", cfg.Token))
+	}
+	cmd.Env = append(cmd.Env, "NO_BROWSER=1", "CI=1")
+
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		ctx.Error(fmt.Sprintf("Failed to run qoderclicn: %v", err), 500)
+		AddSystemLog(fmt.Sprintf("Models refresh failed (%s): %v: %s", cmdPath, err, string(out)), "error", "cli")
+		ctx.Error(fmt.Sprintf("Failed to run %s: %v: %s", binaryName, err, string(out)), 500)
 		return
 	}
 

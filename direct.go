@@ -781,7 +781,7 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 				model = chunk.Model
 			}
 			for _, choice := range chunk.Choices {
-				contentBuilder.WriteString(choice.Delta.Content)
+				contentBuilder.WriteString(choice.Content())
 			}
 		}
 	}
@@ -877,15 +877,26 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 			}
 			outLen += len(chunkJSON)
 			var chunk ChatChunk
+			forwardJSON := chunkJSON
 			if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
-				for _, choice := range chunk.Choices {
-					fullContent.WriteString(choice.Delta.Content)
+				normalized := false
+				for i, choice := range chunk.Choices {
+					fullContent.WriteString(choice.Content())
+					if choice.Delta.Content == "" && choice.Message.Content != "" {
+						chunk.Choices[i].Delta.Content = choice.Message.Content
+						normalized = true
+					}
+				}
+				if normalized {
+					if b, merr := json.Marshal(chunk); merr == nil {
+						forwardJSON = b
+					}
 				}
 			}
 			if _, werr := w.Write([]byte("data: ")); werr != nil {
 				return
 			}
-			if _, werr := w.Write(chunkJSON); werr != nil {
+			if _, werr := w.Write(forwardJSON); werr != nil {
 				return
 			}
 			if _, werr := w.Write([]byte("\n\n")); werr != nil {
