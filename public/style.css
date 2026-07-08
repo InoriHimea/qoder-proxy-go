@@ -258,10 +258,14 @@ td{padding:10px 14px;color:var(--text2);vertical-align:middle}
 .log-detail{background:var(--surface);padding:16px;display:none;animation:slidedown .2s ease}
 .log-detail.open{display:block}
 @keyframes slidedown{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
-.log-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:800px){.log-detail-grid{grid-template-columns:1fr}}
+.log-detail-grid{display:flex;flex-direction:column;gap:16px}
 .log-detail-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:6px}
-.json-block{background:var(--card);border:1px solid var(--border);border-radius:7px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7;overflow-x:auto;max-height:300px;overflow-y:auto;white-space:pre;word-break:break-all}
+.json-block{background:var(--card);border:1px solid var(--border);border-radius:7px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;overflow-x:hidden}
+.token-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:16px}
+.token-metric{background:var(--card);border:1px solid var(--border);border-radius:7px;padding:10px 12px;text-align:center}
+.token-metric-value{font-size:18px;font-weight:700;color:var(--text1)}
+.token-metric-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+.stream-raw-block{background:var(--card);border:1px solid var(--border);border-radius:7px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:10px;line-height:1.6;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;overflow-x:hidden;color:var(--text2)}
 .json-string{color:var(--syntax-string)}.json-number{color:var(--syntax-number)}.json-bool{color:var(--syntax-bool)}.json-null{color:var(--syntax-null)}.json-key{color:var(--syntax-key)}
 
 /* ── System logs ─────────────────────────────────────────────────────────── */

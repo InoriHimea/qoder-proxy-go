@@ -318,6 +318,10 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 						ctx.SetBody(respBody2)
 						sys, prompt := extractSystemAndPrompt(req.Messages)
 						um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody2)), false, time.Since(started).Milliseconds())
+						ctx.SetUserValue("log_metrics", &LogMetrics{
+							InputTokens:  countTokens(sys + "\n" + prompt),
+							OutputTokens: countTokens(string(respBody2)),
+						})
 						return false
 					}
 				} else if err2 == nil {
@@ -355,6 +359,10 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 						ctx.SetBody(respBody2)
 						sys, prompt := extractSystemAndPrompt(req.Messages)
 						um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody2)), false, time.Since(started).Milliseconds())
+						ctx.SetUserValue("log_metrics", &LogMetrics{
+							InputTokens:  countTokens(sys + "\n" + prompt),
+							OutputTokens: countTokens(string(respBody2)),
+						})
 						return false
 					}
 				}
@@ -365,6 +373,10 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody)), false, time.Since(started).Milliseconds())
+	ctx.SetUserValue("log_metrics", &LogMetrics{
+		InputTokens:  countTokens(sys + "\n" + prompt),
+		OutputTokens: countTokens(string(respBody)),
+	})
 	return false
 }
 
@@ -471,6 +483,10 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 
 		sys, prompt := extractSystemAndPrompt(req.Messages)
 		um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
+		ctx.SetUserValue("log_metrics", &LogMetrics{
+			InputTokens:  countTokens(sys + "\n" + prompt),
+			OutputTokens: countTokens(fullContent.String()),
+		})
 	})
 
 	return false
@@ -849,6 +865,17 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
+	ctx.SetUserValue("log_metrics", &LogMetrics{
+		InputTokens:    countTokens(sys + "\n" + prompt),
+		OutputTokens:   countTokens(finalThinking + finalContent),
+		ThinkingTokens: countTokens(finalThinking),
+	})
+
+	// Persist raw SSE lines so the dashboard can show the original stream
+	if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+		UpdateRequestLogRawLines(logID, rawLines)
+	}
+
 	return false
 }
 
@@ -969,10 +996,16 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 
 		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
 			UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
+			UpdateRequestLogRawLines(logID, rawLines)
 		}
 
 		sys, prompt := extractSystemAndPrompt(req.Messages)
 		um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(fullThinking.String()+fullContent.String()), false, time.Since(started).Milliseconds())
+		ctx.SetUserValue("log_metrics", &LogMetrics{
+			InputTokens:    countTokens(sys + "\n" + prompt),
+			OutputTokens:   countTokens(fullThinking.String() + fullContent.String()),
+			ThinkingTokens: countTokens(fullThinking.String()),
+		})
 	})
 
 	return false

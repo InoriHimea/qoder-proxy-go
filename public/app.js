@@ -895,10 +895,42 @@ window.showLogDetail = async (id) => {
   const body = $('log-modal-body');
   modal.classList.add('open');
   body.innerHTML = '<div class="spinner"></div>';
-  
+
   try {
     const data = await api(`/dashboard/api/logs/${id}`);
+
+    // Build token metrics section if any token data exists
+    let metricsHTML = '';
+    if (data.input_tokens || data.output_tokens || data.thinking_tokens || data.cache_creation_tokens || data.cache_read_tokens) {
+      metricsHTML = `
+        <div class="token-metrics">
+          ${data.input_tokens ? `<div class="token-metric"><div class="token-metric-value">${data.input_tokens}</div><div class="token-metric-label">Input</div></div>` : ''}
+          ${data.output_tokens ? `<div class="token-metric"><div class="token-metric-value">${data.output_tokens}</div><div class="token-metric-label">Output</div></div>` : ''}
+          ${data.thinking_tokens ? `<div class="token-metric"><div class="token-metric-value">${data.thinking_tokens}</div><div class="token-metric-label">Thinking</div></div>` : ''}
+          ${data.cache_creation_tokens ? `<div class="token-metric"><div class="token-metric-value">${data.cache_creation_tokens}</div><div class="token-metric-label">Cache Create</div></div>` : ''}
+          ${data.cache_read_tokens ? `<div class="token-metric"><div class="token-metric-value">${data.cache_read_tokens}</div><div class="token-metric-label">Cache Read</div></div>` : ''}
+        </div>
+      `;
+    }
+
+    // Build stream raw lines section if available
+    let streamRawHTML = '';
+    if (data.is_sse && data.stream_raw_lines) {
+      try {
+        const rawLines = JSON.parse(data.stream_raw_lines);
+        if (rawLines && rawLines.length > 0) {
+          streamRawHTML = `
+            <div>
+              <div class="log-detail-label">Stream Raw Lines (${rawLines.length} lines)</div>
+              <div class="stream-raw-block">${rawLines.join('\n')}</div>
+            </div>
+          `;
+        }
+      } catch (e) {}
+    }
+
     body.innerHTML = `
+      ${metricsHTML}
       <div class="log-detail-grid">
         <div>
           <div class="log-detail-label">Request Body</div>
@@ -908,6 +940,7 @@ window.showLogDetail = async (id) => {
           <div class="log-detail-label">Response Data</div>
           <div class="json-block">${syntaxJson(data.response_body)}</div>
         </div>
+        ${streamRawHTML}
       </div>
       <div style="margin-top:20px;">
         <div class="log-detail-label">Full Metadata</div>

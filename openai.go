@@ -228,6 +228,11 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		inputTokens := countTokens(fullSystem + "\n" + prompt)
 		respData := buildAnthropicResponse(id, req.Model, outStr, parseToolCallOutput(outStr), inputTokens, thinkingStr)
 		ctx.SetUserValue("response_body", respData)
+		ctx.SetUserValue("log_metrics", &LogMetrics{
+			InputTokens:    respData.Usage.InputTokens,
+			OutputTokens:   respData.Usage.OutputTokens,
+			ThinkingTokens: countTokens(thinkingStr),
+		})
 		json.NewEncoder(ctx).Encode(respData)
 		um.Record(req.Model, countTokens(prompt), countTokens(thinkingStr+outStr), false, time.Since(started).Milliseconds())
 		return
@@ -328,6 +333,11 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		}
 
 		um.Record(req.Model, inputTokens, countTokens(thinkingStr+fullContent.String()), false, time.Since(started).Milliseconds())
+		ctx.SetUserValue("log_metrics", &LogMetrics{
+			InputTokens:    inputTokens,
+			OutputTokens:   countTokens(thinkingStr + fullContent.String()),
+			ThinkingTokens: countTokens(thinkingStr),
+		})
 	})
 }
 
@@ -477,6 +487,11 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 
 	json.NewEncoder(ctx).Encode(resp)
 	um.Record(req.Model, countTokens(prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
+	ctx.SetUserValue("log_metrics", &LogMetrics{
+		InputTokens:    countTokens(prompt),
+		OutputTokens:   countTokens(finalThinking + finalContent),
+		ThinkingTokens: countTokens(finalThinking),
+	})
 }
 
 func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *ConfigManager, um *UsageManager, started time.Time, toolPrompt string) {
@@ -590,6 +605,11 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		}
 
 		um.Record(req.Model, countTokens(prompt), countTokens(fullThinking.String()+fullContent.String()), false, time.Since(started).Milliseconds())
+		ctx.SetUserValue("log_metrics", &LogMetrics{
+			InputTokens:    countTokens(prompt),
+			OutputTokens:   countTokens(fullThinking.String() + fullContent.String()),
+			ThinkingTokens: countTokens(fullThinking.String()),
+		})
 	})
 
 }

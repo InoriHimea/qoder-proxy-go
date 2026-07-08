@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.8.1"
+const serverVersion = "3.8.2"
 
 func main() {
 	startTime = time.Now()
@@ -276,6 +276,10 @@ func main() {
 			respBody := ctx.UserValue("response_body")
 
 			AddRequestLogWithID(logID, string(ctx.Method()), path, ctx.Response.StatusCode(), isSSE, bodyObj, respBody)
+
+			if metrics, ok := ctx.UserValue("log_metrics").(*LogMetrics); ok && metrics != nil {
+				UpdateRequestLogTokens(logID, metrics.InputTokens, metrics.OutputTokens, metrics.ThinkingTokens, metrics.CacheCreationTokens, metrics.CacheReadTokens)
+			}
 		}
 	}
 
