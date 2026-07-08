@@ -704,11 +704,13 @@ func cutSSEData(line string) (data string, ok bool) {
 
 // cnSSEEnvelope matches the error-path SSE payload shape from the JS
 // bundle's xO(): {statusCodeValue, statusCode, body}. Success-path chunks
-// are NOT enveloped and arrive as plain OpenAI-shape JSON.
+// are NOT enveloped and arrive as plain OpenAI-shape JSON. statusCode is
+// observed as both a string ("OK") and a number depending on gateway
+// path, so it's left untyped — only StatusCodeValue is actually used.
 type cnSSEEnvelope struct {
-	StatusCodeValue *float64 `json:"statusCodeValue"`
-	StatusCode      int      `json:"statusCode"`
-	Body            string   `json:"body"`
+	StatusCodeValue *float64        `json:"statusCodeValue"`
+	StatusCode      json.RawMessage `json:"statusCode"`
+	Body            string          `json:"body"`
 }
 
 // isCNSSESentinel matches no-op control lines that should be skipped
