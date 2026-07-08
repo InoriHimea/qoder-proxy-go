@@ -767,9 +767,13 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	var contentBuilder strings.Builder
+	var rawLines []string
 	model := req.Model
 	for scanner.Scan() {
 		line := scanner.Text()
+		if line != "" {
+			rawLines = append(rawLines, line)
+		}
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -798,6 +802,13 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	}
 
 	finalContent := contentBuilder.String()
+	if finalContent == "" {
+		dump := strings.Join(rawLines, " | ")
+		if len(dump) > 2000 {
+			dump = dump[:2000]
+		}
+		AddSystemLog(fmt.Sprintf("CN gateway non-stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+	}
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	resp := map[string]interface{}{
 		"id":      id,
@@ -862,10 +873,14 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 		var fullContent strings.Builder
+		var rawLines []string
 		outLen := 0
 		streamErr := false
 		for scanner.Scan() {
 			line := scanner.Text()
+			if line != "" {
+				rawLines = append(rawLines, line)
+			}
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
@@ -919,6 +934,14 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 		if !streamErr {
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			w.Flush()
+		}
+
+		if !streamErr && fullContent.Len() == 0 {
+			dump := strings.Join(rawLines, " | ")
+			if len(dump) > 2000 {
+				dump = dump[:2000]
+			}
+			AddSystemLog(fmt.Sprintf("CN gateway stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
 		}
 
 		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
