@@ -182,7 +182,9 @@ func anthropicMessagesToPrompt(req AnthropicRequest) string {
 
 // buildAnthropicResponse builds the non-streaming Anthropic message body,
 // switching to tool_use content blocks when parsed is a tool-calls payload.
-func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput) AnthropicResponse {
+// inputTokens is the caller-computed token count for the request's system+
+// messages; output tokens are derived here from the actual content.
+func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput, inputTokens int) AnthropicResponse {
 	if parsed != nil && parsed.Type == "tool_calls" {
 		var blocks []AnthropicContent
 		if parsed.PrefixText != "" {
@@ -207,13 +209,13 @@ func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput)
 			Model:      model,
 			Content:    blocks,
 			StopReason: "tool_use",
-			Usage:      AnthropicUsage{InputTokens: 0, OutputTokens: 0},
+			Usage:      AnthropicUsage{InputTokens: inputTokens, OutputTokens: countTokens(content)},
 		}
 	}
-	return buildAnthropicFullResponse(id, model, content)
+	return buildAnthropicFullResponse(id, model, content, inputTokens)
 }
 
-func buildAnthropicFullResponse(id string, model string, content string) AnthropicResponse {
+func buildAnthropicFullResponse(id string, model string, content string, inputTokens int) AnthropicResponse {
 	return AnthropicResponse{
 		ID:    id,
 		Type:  "message",
@@ -224,13 +226,13 @@ func buildAnthropicFullResponse(id string, model string, content string) Anthrop
 		},
 		StopReason: "end_turn",
 		Usage: AnthropicUsage{
-			InputTokens:  0,
-			OutputTokens: 0,
+			InputTokens:  inputTokens,
+			OutputTokens: countTokens(content),
 		},
 	}
 }
 
-func buildAnthropicStartEvent(id string, model string) AnthropicSSEEvent {
+func buildAnthropicStartEvent(id string, model string, inputTokens int) AnthropicSSEEvent {
 	return AnthropicSSEEvent{
 		Type: "message_start",
 		Message: &AnthropicResponse{
@@ -238,7 +240,7 @@ func buildAnthropicStartEvent(id string, model string) AnthropicSSEEvent {
 			Type:  "message",
 			Role:  "assistant",
 			Model: model,
-			Usage: AnthropicUsage{InputTokens: 0, OutputTokens: 0},
+			Usage: AnthropicUsage{InputTokens: inputTokens, OutputTokens: 0},
 		},
 	}
 }

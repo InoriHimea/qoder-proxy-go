@@ -317,7 +317,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 						ctx.SetContentType(hResp2.Header.Get("Content-Type"))
 						ctx.SetBody(respBody2)
 						sys, prompt := extractSystemAndPrompt(req.Messages)
-						um.Record(req.Model, len(sys)+len(prompt), len(respBody2), false, time.Since(started).Milliseconds())
+						um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody2)), false, time.Since(started).Milliseconds())
 						return false
 					}
 				} else if err2 == nil {
@@ -354,7 +354,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 						ctx.SetContentType(hResp2.Header.Get("Content-Type"))
 						ctx.SetBody(respBody2)
 						sys, prompt := extractSystemAndPrompt(req.Messages)
-						um.Record(req.Model, len(sys)+len(prompt), len(respBody2), false, time.Since(started).Milliseconds())
+						um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody2)), false, time.Since(started).Milliseconds())
 						return false
 					}
 				}
@@ -364,7 +364,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 	}
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
-	um.Record(req.Model, len(sys)+len(prompt), len(respBody), false, time.Since(started).Milliseconds())
+	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody)), false, time.Since(started).Milliseconds())
 	return false
 }
 
@@ -427,11 +427,9 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 
 		// Use a buffer to read from the stream and write to the client
 		buf := make([]byte, 4096)
-		outLen := 0
 		for {
 			n, err := hResp.Body.Read(buf)
 			if n > 0 {
-				outLen += n
 				_, writeErr := w.Write(buf[:n])
 				if writeErr != nil {
 					break // Client disconnected
@@ -472,7 +470,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 		}
 
 		sys, prompt := extractSystemAndPrompt(req.Messages)
-		um.Record(req.Model, len(sys)+len(prompt), outLen/50, false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 
 	return false
@@ -843,7 +841,7 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	ctx.SetBody(respBody)
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
-	um.Record(req.Model, len(sys)+len(prompt), len(finalContent), false, time.Since(started).Milliseconds())
+	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalContent), false, time.Since(started).Milliseconds())
 	return false
 }
 
@@ -888,7 +886,6 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 
 		var fullContent strings.Builder
 		var rawLines []string
-		outLen := 0
 		streamErr := false
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -915,7 +912,6 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 			if chunkJSON == nil {
 				continue
 			}
-			outLen += len(chunkJSON)
 			var chunk ChatChunk
 			forwardJSON := chunkJSON
 			if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
@@ -963,7 +959,7 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 		}
 
 		sys, prompt := extractSystemAndPrompt(req.Messages)
-		um.Record(req.Model, len(sys)+len(prompt), outLen/50, false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 
 	return false

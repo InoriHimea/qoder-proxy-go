@@ -234,8 +234,8 @@ async function fetchUsage() {
             <tr>
               <th>Time</th>
               <th>Model</th>
-              <th>Input Chars</th>
-              <th>Output Chars</th>
+              <th>Input Tokens</th>
+              <th>Output Tokens</th>
               <th>Duration</th>
               <th>Status</th>
             </tr>

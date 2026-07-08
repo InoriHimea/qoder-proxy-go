@@ -154,7 +154,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 	stdout, err := spawnQoderCli(ctx, prompt, opts, cm)
 	if err != nil {
 		ctx.Error(RedactSensitiveInfo(fmt.Sprintf("Spawn failed: %v", err)), http.StatusInternalServerError)
-		um.Record(req.Model, len(prompt), 0, true, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), 0, true, time.Since(started).Milliseconds())
 		return
 	}
 
@@ -183,10 +183,11 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		}
 
 		outStr := fullContent.String()
-		respData := buildAnthropicResponse(id, req.Model, outStr, parseToolCallOutput(outStr))
+		inputTokens := countTokens(fullSystem + "\n" + prompt)
+		respData := buildAnthropicResponse(id, req.Model, outStr, parseToolCallOutput(outStr), inputTokens)
 		ctx.SetUserValue("response_body", respData)
 		json.NewEncoder(ctx).Encode(respData)
-		um.Record(req.Model, len(prompt), len(outStr), false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), countTokens(outStr), false, time.Since(started).Milliseconds())
 		return
 	}
 
@@ -209,7 +210,6 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 10*1024*1024)
 
-		outLen := 0
 		var fullContent strings.Builder
 		var fragments []string
 		for scanner.Scan() {
@@ -218,7 +218,6 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 				if line["type"] == "assistant" {
 					if msg, ok := line["message"].(map[string]interface{}); ok {
 						if content := extractContentText(msg["content"]); content != "" {
-							outLen += len(content)
 							fullContent.WriteString(content)
 							fragments = append(fragments, content)
 						}
@@ -231,10 +230,11 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			AddSystemLog(fmt.Sprintf("Scanner error in anthropic stream: %v", err), "error", "cli")
 		}
 
+		inputTokens := countTokens(fullSystem + "\n" + prompt)
 		parsed := parseToolCallOutput(fullContent.String())
 		if parsed != nil && parsed.Type == "tool_calls" {
 			if parsed.PrefixText != "" {
-				writeEvent("message_start", buildAnthropicStartEvent(id, req.Model))
+				writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
 				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
 				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: 0, Delta: &AnthropicEventDelta{Type: "text_delta", Text: parsed.PrefixText}})
 				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: 0})
@@ -264,7 +264,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		} else {
-			writeEvent("message_start", buildAnthropicStartEvent(id, req.Model))
+			writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
 			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
 			for _, frag := range fragments {
 				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: 0, Delta: &AnthropicEventDelta{Type: "text_delta", Text: frag}})
@@ -274,7 +274,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		}
 
-		um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
+		um.Record(req.Model, inputTokens, countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 }
 
@@ -325,7 +325,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	stdout, err := spawnQoderCli(ctx, prompt, opts, cm)
 	if err != nil {
 		ctx.Error(RedactSensitiveInfo(fmt.Sprintf("Spawn failed: %v", err)), http.StatusInternalServerError)
-		um.Record(req.Model, len(prompt), 0, true, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), 0, true, time.Since(started).Milliseconds())
 		return
 	}
 
@@ -366,7 +366,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 
 	if cliErrorMsg != "" {
 		ctx.Error(fmt.Sprintf("CLI Error: %s", cliErrorMsg), http.StatusUnauthorized)
-		um.Record(req.Model, len(prompt), 0, true, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), 0, true, time.Since(started).Milliseconds())
 		return
 	}
 
@@ -415,7 +415,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	}
 
 	json.NewEncoder(ctx).Encode(resp)
-	um.Record(req.Model, len(prompt), len(finalContent), false, time.Since(started).Milliseconds())
+	um.Record(req.Model, countTokens(prompt), countTokens(finalContent), false, time.Since(started).Milliseconds())
 }
 
 func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *ConfigManager, um *UsageManager, started time.Time, toolPrompt string) {
@@ -431,7 +431,7 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 	stdout, err := spawnQoderCli(ctx, prompt, opts, cm)
 	if err != nil {
 		ctx.Error(RedactSensitiveInfo(fmt.Sprintf("Spawn failed: %v", err)), http.StatusInternalServerError)
-		um.Record(req.Model, len(prompt), 0, true, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), 0, true, time.Since(started).Milliseconds())
 		return
 	}
 
@@ -457,7 +457,6 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		// replayed as content deltas once we've confirmed the assembled output
 		// is plain text; a tool-call payload is instead emitted as one
 		// tool_calls chunk.
-		outLen := 0
 		var fullContent strings.Builder
 		var fragments []string
 		for scanner.Scan() {
@@ -465,7 +464,6 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
 				if msg, ok := line["message"].(map[string]interface{}); ok {
 					if content := extractContentText(msg["content"]); content != "" {
-						outLen += len(content)
 						fullContent.WriteString(content)
 						fragments = append(fragments, content)
 					}
@@ -520,7 +518,7 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 			UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
 		}
 
-		um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 
 }
