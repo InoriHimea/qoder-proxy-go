@@ -699,16 +699,27 @@ type cnSSEEnvelope struct {
 	Body            string   `json:"body"`
 }
 
+// isCNSSESentinel matches no-op control lines that should be skipped
+// without ending or failing the stream.
 func isCNSSESentinel(data string) bool {
-	return data == "[DONE]" || data == "[NOT_EXCEED_QUOTA]" ||
-		strings.HasPrefix(data, "[EXCEED_QUOTA]") || strings.HasPrefix(data, "[NOTIFICATIONS]")
+	return data == "[NOT_EXCEED_QUOTA]" || strings.HasPrefix(data, "[NOTIFICATIONS]")
 }
 
 // parseCNSSELine inspects one SSE "data:" payload. If it is a non-200
-// error envelope, ok=false and errMsg/errStatus describe the failure.
-// Otherwise chunk is the (already-unwrapped) chunk JSON to forward/parse,
-// or nil if the line was a sentinel/no-op.
+// error envelope or a quota-exceeded sentinel, ok=false and errMsg/errStatus
+// describe the failure. Otherwise chunk is the (already-unwrapped) chunk
+// JSON to forward/parse, or nil if the line was a no-op sentinel.
 func parseCNSSELine(data string) (chunk []byte, done bool, errMsg string, errStatus int) {
+	if data == "[DONE]" {
+		return nil, true, "", 0
+	}
+	if strings.HasPrefix(data, "[EXCEED_QUOTA]") {
+		msg := strings.TrimSpace(strings.TrimPrefix(data, "[EXCEED_QUOTA]"))
+		if msg == "" {
+			msg = "quota exceeded"
+		}
+		return nil, false, msg, http.StatusPaymentRequired
+	}
 	if isCNSSESentinel(data) {
 		return nil, true, "", 0
 	}
