@@ -441,7 +441,8 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 				// Try to extract content chunks for logging
 				lines := strings.Split(string(buf[:n]), "\n")
 				for _, line := range lines {
-					if strings.HasPrefix(line, "data: ") && line != "data: [DONE]" {
+					data, ok := cutSSEData(line)
+					if ok && data != "[DONE]" {
 						var chunk struct {
 							Choices []struct {
 								Delta struct {
@@ -449,7 +450,7 @@ func (c *DirectClient) handleStream(ctx *fasthttp.RequestCtx, reqURL string, bod
 								} `json:"delta"`
 							} `json:"choices"`
 						}
-						if err := json.Unmarshal([]byte(line[6:]), &chunk); err == nil {
+						if err := json.Unmarshal([]byte(data), &chunk); err == nil {
 							if len(chunk.Choices) > 0 {
 								fullContent.WriteString(chunk.Choices[0].Delta.Content)
 							}
@@ -690,6 +691,17 @@ func (c *DirectClient) sendCNRequest(cfg Config, bodyJSON []byte, modelKey, sour
 	return hResp, nil
 }
 
+// cutSSEData strips a "data:" SSE field prefix, tolerating both "data: "
+// (per SSE spec, one optional leading space) and "data:" with no space —
+// the CN gateway sends the latter, which strings.HasPrefix(line, "data: ")
+// silently fails to match, dropping every chunk without error.
+func cutSSEData(line string) (data string, ok bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	return strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "), true
+}
+
 // cnSSEEnvelope matches the error-path SSE payload shape from the JS
 // bundle's xO(): {statusCodeValue, statusCode, body}. Success-path chunks
 // are NOT enveloped and arrive as plain OpenAI-shape JSON.
@@ -774,10 +786,10 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 		if line != "" {
 			rawLines = append(rawLines, line)
 		}
-		if !strings.HasPrefix(line, "data: ") {
+		data, ok := cutSSEData(line)
+		if !ok {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
 		chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
 		if done {
 			break
@@ -881,10 +893,10 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 			if line != "" {
 				rawLines = append(rawLines, line)
 			}
-			if !strings.HasPrefix(line, "data: ") {
+			data, ok := cutSSEData(line)
+			if !ok {
 				continue
 			}
-			data := strings.TrimPrefix(line, "data: ")
 			chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
 			if done {
 				break
