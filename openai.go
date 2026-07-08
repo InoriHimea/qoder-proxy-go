@@ -27,12 +27,22 @@ type ChatRequest struct {
 type Message struct {
 	Role    string      `json:"role"`
 	Content interface{} `json:"content"`
+	// ToolCalls carries an assistant turn's prior tool_calls (round-tripped
+	// history); ToolCallID links a `role: tool` result back to the call it
+	// answers. Both are needed to reconstruct multi-turn tool conversations
+	// as text the CLI can read, since the CLI never executes tools itself.
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type ChatChunkDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string        `json:"role,omitempty"`
+	Content   string        `json:"content,omitempty"`
+	ToolCalls []interface{} `json:"tool_calls,omitempty"`
 }
+
+// strPtr returns a pointer to s, used for the optional finish_reason field.
+func strPtr(s string) *string { return &s }
 
 type ChatChunkChoice struct {
 	Index int            `json:"index"`
@@ -93,6 +103,19 @@ func extractContentText(content interface{}) string {
 	return ""
 }
 
+// mergeSystemPrompt appends the tool-protocol prompt to the caller's system
+// prompt, separated by a blank line. Returns sys unchanged when toolPrompt is
+// empty (no tools requested).
+func mergeSystemPrompt(sys, toolPrompt string) string {
+	if toolPrompt == "" {
+		return sys
+	}
+	if sys == "" {
+		return toolPrompt
+	}
+	return sys + "\n\n" + toolPrompt
+}
+
 func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *UsageManager, dc *DirectClient) {
 	started := time.Now()
 	var req AnthropicRequest
@@ -104,18 +127,27 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 
 	cfg := cm.Get()
 	if cfg.UseDirectAPI {
-		// Convert Anthropic to OpenAI-style ChatRequest for our simple DirectClient
-		// Or implement HandleAnthropic in DirectClient. For now, we skip it or use CLI.
 		AddSystemLog("Direct API requested but not yet fully implemented for Anthropic protocol. Falling back to CLI.", "warn", "direct")
 	}
 
+	// Inject a format-only system prompt describing available Anthropic tools.
+	// Like the OpenAI path, the prompt contains no role-defining statements and
+	// teaches the model the \`<tool_calls>\` JSON code-block shape to emit.
+	var toolPrompt string
+	if len(req.Tools) > 0 {
+		toolPrompt = buildToolSystemPromptFromRaw(req.Tools, true)
+	}
+
+	normalizedSystem := normalizeAnthropicSystem(req.System)
+	fullSystem := mergeSystemPrompt(normalizedSystem, toolPrompt)
+
 	prompt := anthropicMessagesToPrompt(req)
-	AddSystemLog(fmt.Sprintf("Anthropic system length: %d, Prompt length: %d", len(req.System), len(prompt)), "info", "cli")
+	AddSystemLog(fmt.Sprintf("Anthropic system length: %d, Prompt length: %d", len(fullSystem), len(prompt)), "info", "cli")
 	opts := SpawnOptions{
 		Model:           req.Model,
 		ReasoningEffort: req.ReasoningEffort,
 		MaxTokens:       req.MaxTokens,
-		SystemPrompt:    req.System,
+		SystemPrompt:    fullSystem,
 		DisableTools:    true,
 	}
 
@@ -151,7 +183,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		}
 
 		outStr := fullContent.String()
-		respData := buildAnthropicFullResponse(id, req.Model, outStr)
+		respData := buildAnthropicResponse(id, req.Model, outStr, parseToolCallOutput(outStr))
 		ctx.SetUserValue("response_body", respData)
 		json.NewEncoder(ctx).Encode(respData)
 		um.Record(req.Model, len(prompt), len(outStr), false, time.Since(started).Milliseconds())
@@ -171,11 +203,15 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			w.Flush()
 		}
 
-		writeEvent("message_start", buildAnthropicStartEvent(id, req.Model))
-		writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
-
+		// The CLI emits whole JSON objects per line — buffer the whole stream to
+		// decide whether to emit a text or tool_use reply, then replay.
 		scanner := bufio.NewScanner(stdout)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 10*1024*1024)
+
 		outLen := 0
+		var fullContent strings.Builder
+		var fragments []string
 		for scanner.Scan() {
 			var line map[string]interface{}
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
@@ -183,16 +219,60 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 					if msg, ok := line["message"].(map[string]interface{}); ok {
 						if content := extractContentText(msg["content"]); content != "" {
 							outLen += len(content)
-							writeEvent("content_block_delta", buildAnthropicDeltaEvent(content))
+							fullContent.WriteString(content)
+							fragments = append(fragments, content)
 						}
 					}
 				}
 			}
 		}
 
-		writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: 0})
-		writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
-		writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
+		if err := scanner.Err(); err != nil {
+			AddSystemLog(fmt.Sprintf("Scanner error in anthropic stream: %v", err), "error", "cli")
+		}
+
+		parsed := parseToolCallOutput(fullContent.String())
+		if parsed != nil && parsed.Type == "tool_calls" {
+			if parsed.PrefixText != "" {
+				writeEvent("message_start", buildAnthropicStartEvent(id, req.Model))
+				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: 0, Delta: &AnthropicEventDelta{Type: "text_delta", Text: parsed.PrefixText}})
+				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: 0})
+			}
+			baseIndex := 0
+			if parsed.PrefixText != "" {
+				baseIndex = 1
+			}
+			for i, tc := range parsed.ToolCalls {
+				blockIndex := baseIndex + i
+				var input interface{}
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+					input = map[string]interface{}{}
+				}
+				writeEvent("content_block_start", AnthropicSSEEvent{
+					Type:         "content_block_start",
+					Index:        blockIndex,
+					ContentBlock: &AnthropicContent{Type: "tool_use", ID: generateCallId("toolu_"), Name: tc.Function.Name, Input: input},
+				})
+				writeEvent("content_block_delta", AnthropicSSEEvent{
+					Type:  "content_block_delta",
+					Index: blockIndex,
+					Delta: &AnthropicEventDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
+				})
+				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: blockIndex})
+			}
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
+			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
+		} else {
+			writeEvent("message_start", buildAnthropicStartEvent(id, req.Model))
+			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+			for _, frag := range fragments {
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: 0, Delta: &AnthropicEventDelta{Type: "text_delta", Text: frag}})
+			}
+			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: 0})
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
+			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
+		}
 
 		um.Record(req.Model, len(prompt), outLen, false, time.Since(started).Milliseconds())
 	})
@@ -217,9 +297,17 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 		AddSystemLog("Direct API returned 401/404, falling back to CLI mode automatically...", "info", "system")
 	}
 
+	// Inject a format-only system prompt describing available tools.  The
+	// prompt contains no role-defining statements — it only teaches the model
+	// what tools exist and what JSON code-block shape to emit.
+	var toolPrompt string
+	if len(req.Tools) > 0 {
+		toolPrompt = buildToolSystemPromptFromRaw(req.Tools, false)
+	}
+
 	if req.Stream {
 		ctx.SetUserValue("response_body", "[Streaming Response...]")
-		handleChatCompletionsStream(ctx, req, cm, um, started)
+		handleChatCompletionsStream(ctx, req, cm, um, started, toolPrompt)
 		return
 	}
 
@@ -230,7 +318,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 		Model:           req.Model,
 		ReasoningEffort: req.ReasoningEffort,
 		MaxTokens:       req.MaxTokens,
-		SystemPrompt:    sys,
+		SystemPrompt:    mergeSystemPrompt(sys, toolPrompt),
 		DisableTools:    true,
 	}
 
@@ -330,13 +418,13 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	um.Record(req.Model, len(prompt), len(finalContent), false, time.Since(started).Milliseconds())
 }
 
-func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *ConfigManager, um *UsageManager, started time.Time) {
+func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *ConfigManager, um *UsageManager, started time.Time, toolPrompt string) {
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	opts := SpawnOptions{
 		Model:           req.Model,
 		ReasoningEffort: req.ReasoningEffort,
 		MaxTokens:       req.MaxTokens,
-		SystemPrompt:    sys,
+		SystemPrompt:    mergeSystemPrompt(sys, toolPrompt),
 		DisableTools:    true,
 	}
 
@@ -362,8 +450,16 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 10*1024*1024)
 
+		// The CLI emits whole JSON objects per line, not token-level deltas, so
+		// a single line may itself be the entire `{"tool_calls": [...]}`
+		// payload (or a fragment of one spread across lines). We can't know
+		// which until the process finishes, so fragments are buffered and only
+		// replayed as content deltas once we've confirmed the assembled output
+		// is plain text; a tool-call payload is instead emitted as one
+		// tool_calls chunk.
 		outLen := 0
 		var fullContent strings.Builder
+		var fragments []string
 		for scanner.Scan() {
 			var line map[string]interface{}
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
@@ -371,15 +467,7 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 					if content := extractContentText(msg["content"]); content != "" {
 						outLen += len(content)
 						fullContent.WriteString(content)
-						chunk := ChatChunk{
-							ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model,
-						}
-						chunk.Choices = []ChatChunkChoice{{Index: 0}}
-						chunk.Choices[0].Delta.Content = content
-
-						data, _ := json.Marshal(chunk)
-						fmt.Fprintf(w, "data: %s\n\n", data)
-						w.Flush()
+						fragments = append(fragments, content)
 					}
 				}
 			}
@@ -390,6 +478,38 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 			// If it's a buffer too long error, we should definitely know
 			if err == bufio.ErrTooLong {
 				AddSystemLog("Line too long for scanner buffer (10MB)", "error", "cli")
+			}
+		}
+
+		sendChunk := func(delta ChatChunkDelta, finishReason *string) {
+			chunk := ChatChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model}
+			chunk.Choices = []ChatChunkChoice{{Index: 0, Delta: delta, FinishReason: finishReason}}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+
+		parsed := parseToolCallOutput(fullContent.String())
+		if parsed != nil && parsed.Type == "tool_calls" {
+			if parsed.PrefixText != "" {
+				sendChunk(ChatChunkDelta{Content: parsed.PrefixText}, nil)
+			}
+			var tcs []interface{}
+			for i, tc := range parsed.ToolCalls {
+				tcs = append(tcs, map[string]interface{}{
+					"index": i,
+					"id":    tc.ID,
+					"type":  "function",
+					"function": map[string]interface{}{
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					},
+				})
+			}
+			sendChunk(ChatChunkDelta{ToolCalls: tcs}, strPtr("tool_calls"))
+		} else {
+			for _, frag := range fragments {
+				sendChunk(ChatChunkDelta{Content: frag}, nil)
 			}
 		}
 
@@ -437,6 +557,9 @@ func handleModels(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 func extractSystemAndPrompt(messages []Message) (string, string) {
 	var sysSb strings.Builder
 	var userSb strings.Builder
+	// Collect tool round-trips from user/tool/assistant messages and stitch
+	// them as <tool_use>/<tool_result> tagged text.
+	var toolBlocks []string
 	for _, m := range messages {
 		content := ""
 		switch v := m.Content.(type) {
@@ -451,13 +574,60 @@ func extractSystemAndPrompt(messages []Message) (string, string) {
 				}
 			}
 		}
-		if content != "" {
-			if strings.ToLower(m.Role) == "system" {
+		switch strings.ToLower(m.Role) {
+		case "system":
+			if content != "" {
 				sysSb.WriteString(content + "\n\n")
-			} else {
+			}
+		case "tool":
+			// Result of a prior tool call: formatToolResultForPrompt handles
+			// the content shape — a plain string, or a [{type:"text"...}] array.
+			rid := m.ToolCallID
+			if rid == "" {
+				rid = "unknown"
+			}
+			rendered := ""
+			switch v := m.Content.(type) {
+			case string:
+				rendered = v
+			case []interface{}:
+				for _, part := range v {
+					if p, ok := part.(map[string]interface{}); ok {
+						if t, ok := p["text"].(string); ok {
+							rendered += t
+						}
+					} else if s, ok := part.(string); ok {
+						rendered += s
+					}
+				}
+			default:
+				if v != nil {
+					rendered = fmt.Sprintf("%v", v)
+				}
+			}
+			toolBlocks = append(toolBlocks, fmt.Sprintf("<tool_result id=\"%s\">\n%s\n</tool_result>", rid, rendered))
+		case "assistant":
+			if content != "" {
+				userSb.WriteString(fmt.Sprintf("%s: %s\n\n", strings.Title(m.Role), content))
+			}
+			// Prior tool_calls history (assistant wanted to call a tool).
+			for _, tc := range m.ToolCalls {
+				args := tc.Function.Arguments
+				if args == "" {
+					args = "{}"
+				}
+				toolBlocks = append(toolBlocks,
+					fmt.Sprintf("<tool_use name=\"%s\" id=\"%s\">\n%s\n</tool_use>",
+						tc.Function.Name, tc.ID, args))
+			}
+		default:
+			if content != "" {
 				userSb.WriteString(fmt.Sprintf("%s: %s\n\n", strings.Title(m.Role), content))
 			}
 		}
+	}
+	if len(toolBlocks) > 0 {
+		userSb.WriteString(strings.Join(toolBlocks, "\n\n") + "\n\n")
 	}
 	return strings.TrimSpace(sysSb.String()), strings.TrimSpace(userSb.String())
 }

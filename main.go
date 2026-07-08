@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.6.6"
+const serverVersion = "3.7.0"
 
 func main() {
 	startTime = time.Now()

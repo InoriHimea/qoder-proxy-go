@@ -1,19 +1,24 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
 
 // Anthropic Request Structures
 type AnthropicRequest struct {
-	Model           string             `json:"model"`
-	Messages        []AnthropicMessage `json:"messages"`
-	System          string             `json:"system,omitempty"`
-	MaxTokens       int                `json:"max_tokens"`
-	Stream          bool               `json:"stream"`
-	Temperature     *float64           `json:"temperature,omitempty"`
-	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
+	Model    string             `json:"model"`
+	Messages []AnthropicMessage `json:"messages"`
+	// System accepts either a plain string or an array of text blocks (the
+	// cache_control-annotated shape some SDKs send) — normalizeAnthropicContent
+	// flattens either into plain text.
+	System          interface{}     `json:"system,omitempty"`
+	MaxTokens       int             `json:"max_tokens"`
+	Stream          bool            `json:"stream"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Tools           json.RawMessage `json:"tools,omitempty"`
 }
 
 type AnthropicMessage struct {
@@ -34,8 +39,13 @@ type AnthropicResponse struct {
 }
 
 type AnthropicContent struct {
-	Type string `json:"type"` // "text"
-	Text string `json:"text"`
+	Type string `json:"type"` // "text" | "tool_use"
+	Text string `json:"text,omitempty"`
+	// tool_use fields — Input is a parsed object/array/scalar, never a JSON
+	// string (Anthropic spec differs from OpenAI's stringified `arguments`).
+	ID    string      `json:"id,omitempty"`
+	Name  string      `json:"name,omitempty"`
+	Input interface{} `json:"input,omitempty"`
 }
 
 type AnthropicUsage struct {
@@ -53,36 +63,154 @@ type AnthropicSSEEvent struct {
 }
 
 type AnthropicEventDelta struct {
-	Type         string          `json:"type"` // "text_delta"
+	Type         string          `json:"type"` // "text_delta" | "input_json_delta"
 	Text         string          `json:"text,omitempty"`
+	PartialJSON  string          `json:"partial_json,omitempty"`
 	StopReason   string          `json:"stop_reason,omitempty"`
 	StopSequence string          `json:"stop_sequence,omitempty"`
 	Usage        *AnthropicUsage `json:"usage,omitempty"`
 }
 
 // Conversion Helpers
+
+// normalizeAnthropicContent flattens an Anthropic message `content` field —
+// a plain string or an array of typed blocks (text/tool_result/tool_use/
+// image/thinking/document) — into a single text blob the CLI can read. Tool
+// round-trips are preserved as <tool_use>/<tool_result> tagged text so the
+// model can see its own prior calls and their results in history.
+func normalizeAnthropicContent(content interface{}) string {
+	if content == nil {
+		return ""
+	}
+	if s, ok := content.(string); ok {
+		return s
+	}
+	arr, ok := content.([]interface{})
+	if !ok {
+		return fmt.Sprintf("%v", content)
+	}
+
+	var parts []string
+	for _, raw := range arr {
+		if s, ok := raw.(string); ok {
+			if s != "" {
+				parts = append(parts, s)
+			}
+			continue
+		}
+		part, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		partType, _ := part["type"].(string)
+		switch partType {
+		case "text":
+			if t, ok := part["text"].(string); ok && t != "" {
+				parts = append(parts, t)
+			}
+		case "tool_result":
+			toolUseID, _ := part["tool_use_id"].(string)
+			toolText := normalizeAnthropicContent(part["content"])
+			if toolText != "" {
+				parts = append(parts, fmt.Sprintf("<tool_result id=\"%s\">\n%s\n</tool_result>", toolUseID, toolText))
+			}
+		case "tool_use":
+			name, _ := part["name"].(string)
+			id, _ := part["id"].(string)
+			input := part["input"]
+			if input == nil {
+				input = map[string]interface{}{}
+			}
+			inputJSON, err := json.Marshal(input)
+			if err != nil {
+				inputJSON = []byte("{}")
+			}
+			parts = append(parts, fmt.Sprintf("<tool_use name=\"%s\" id=\"%s\">\n%s\n</tool_use>", name, id, string(inputJSON)))
+		case "image":
+			mediaType := "unknown"
+			if src, ok := part["source"].(map[string]interface{}); ok {
+				if mt, ok := src["media_type"].(string); ok && mt != "" {
+					mediaType = mt
+				}
+			}
+			parts = append(parts, fmt.Sprintf("[image: %s]", mediaType))
+		case "thinking":
+			if t, ok := part["thinking"].(string); ok && t != "" {
+				parts = append(parts, "[thinking]\n"+t)
+			}
+		case "document":
+			label, _ := part["name"].(string)
+			if label == "" {
+				if src, ok := part["source"].(map[string]interface{}); ok {
+					if mt, ok := src["media_type"].(string); ok {
+						label = mt
+					}
+				}
+			}
+			if label == "" {
+				label = "file"
+			}
+			parts = append(parts, fmt.Sprintf("[document: %s]", label))
+		case "":
+			if t, ok := part["text"].(string); ok && t != "" {
+				parts = append(parts, t)
+			}
+		default:
+			parts = append(parts, fmt.Sprintf("[unsupported content: %s]", partType))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// normalizeAnthropicSystem flattens the request-level `system` field, which
+// may be a plain string or an array of text blocks.
+func normalizeAnthropicSystem(system interface{}) string {
+	return normalizeAnthropicContent(system)
+}
+
 func anthropicMessagesToPrompt(req AnthropicRequest) string {
 	var sb strings.Builder
 
 	for _, m := range req.Messages {
-		content := ""
-		switch v := m.Content.(type) {
-		case string:
-			content = v
-		case []interface{}:
-			for _, part := range v {
-				if p, ok := part.(map[string]interface{}); ok {
-					if t, ok := p["text"].(string); ok {
-						content += t
-					}
-				}
-			}
-		}
+		content := normalizeAnthropicContent(m.Content)
 		if content != "" {
 			sb.WriteString(fmt.Sprintf("%s: %s\n\n", strings.Title(m.Role), content))
 		}
 	}
 	return sb.String()
+}
+
+// buildAnthropicResponse builds the non-streaming Anthropic message body,
+// switching to tool_use content blocks when parsed is a tool-calls payload.
+func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput) AnthropicResponse {
+	if parsed != nil && parsed.Type == "tool_calls" {
+		var blocks []AnthropicContent
+		if parsed.PrefixText != "" {
+			blocks = append(blocks, AnthropicContent{Type: "text", Text: parsed.PrefixText})
+		}
+		for _, tc := range parsed.ToolCalls {
+			var input interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+				input = map[string]interface{}{}
+			}
+			blocks = append(blocks, AnthropicContent{
+				Type:  "tool_use",
+				ID:    generateCallId("toolu_"),
+				Name:  tc.Function.Name,
+				Input: input,
+			})
+		}
+		return AnthropicResponse{
+			ID:         id,
+			Type:       "message",
+			Role:       "assistant",
+			Model:      model,
+			Content:    blocks,
+			StopReason: "tool_use",
+			Usage:      AnthropicUsage{InputTokens: 0, OutputTokens: 0},
+		}
+	}
+	return buildAnthropicFullResponse(id, model, content)
 }
 
 func buildAnthropicFullResponse(id string, model string, content string) AnthropicResponse {
@@ -111,17 +239,6 @@ func buildAnthropicStartEvent(id string, model string) AnthropicSSEEvent {
 			Role:  "assistant",
 			Model: model,
 			Usage: AnthropicUsage{InputTokens: 0, OutputTokens: 0},
-		},
-	}
-}
-
-func buildAnthropicDeltaEvent(text string) AnthropicSSEEvent {
-	return AnthropicSSEEvent{
-		Type:  "content_block_delta",
-		Index: 0,
-		Delta: &AnthropicEventDelta{
-			Type: "text_delta",
-			Text: text,
 		},
 	}
 }
