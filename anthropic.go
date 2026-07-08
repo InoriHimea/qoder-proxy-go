@@ -39,8 +39,10 @@ type AnthropicResponse struct {
 }
 
 type AnthropicContent struct {
-	Type string `json:"type"` // "text" | "tool_use"
+	Type string `json:"type"` // "text" | "thinking" | "tool_use"
 	Text string `json:"text,omitempty"`
+	// Thinking carries the model's reasoning text for type "thinking" blocks.
+	Thinking string `json:"thinking,omitempty"`
 	// tool_use fields — Input is a parsed object/array/scalar, never a JSON
 	// string (Anthropic spec differs from OpenAI's stringified `arguments`).
 	ID    string      `json:"id,omitempty"`
@@ -63,8 +65,9 @@ type AnthropicSSEEvent struct {
 }
 
 type AnthropicEventDelta struct {
-	Type         string          `json:"type"` // "text_delta" | "input_json_delta"
+	Type         string          `json:"type"` // "text_delta" | "thinking_delta" | "input_json_delta"
 	Text         string          `json:"text,omitempty"`
+	Thinking     string          `json:"thinking,omitempty"`
 	PartialJSON  string          `json:"partial_json,omitempty"`
 	StopReason   string          `json:"stop_reason,omitempty"`
 	StopSequence string          `json:"stop_sequence,omitempty"`
@@ -183,10 +186,15 @@ func anthropicMessagesToPrompt(req AnthropicRequest) string {
 // buildAnthropicResponse builds the non-streaming Anthropic message body,
 // switching to tool_use content blocks when parsed is a tool-calls payload.
 // inputTokens is the caller-computed token count for the request's system+
-// messages; output tokens are derived here from the actual content.
-func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput, inputTokens int) AnthropicResponse {
+// messages; output tokens are derived here from the actual content. When
+// thinking is non-empty, a "thinking" block is prepended to Content — it
+// always leads in the Anthropic protocol.
+func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput, inputTokens int, thinking string) AnthropicResponse {
 	if parsed != nil && parsed.Type == "tool_calls" {
 		var blocks []AnthropicContent
+		if thinking != "" {
+			blocks = append(blocks, AnthropicContent{Type: "thinking", Thinking: thinking})
+		}
 		if parsed.PrefixText != "" {
 			blocks = append(blocks, AnthropicContent{Type: "text", Text: parsed.PrefixText})
 		}
@@ -209,25 +217,28 @@ func buildAnthropicResponse(id, model, content string, parsed *ParsedToolOutput,
 			Model:      model,
 			Content:    blocks,
 			StopReason: "tool_use",
-			Usage:      AnthropicUsage{InputTokens: inputTokens, OutputTokens: countTokens(content)},
+			Usage:      AnthropicUsage{InputTokens: inputTokens, OutputTokens: countTokens(thinking + content)},
 		}
 	}
-	return buildAnthropicFullResponse(id, model, content, inputTokens)
+	return buildAnthropicFullResponse(id, model, content, inputTokens, thinking)
 }
 
-func buildAnthropicFullResponse(id string, model string, content string, inputTokens int) AnthropicResponse {
+func buildAnthropicFullResponse(id string, model string, content string, inputTokens int, thinking string) AnthropicResponse {
+	var blocks []AnthropicContent
+	if thinking != "" {
+		blocks = append(blocks, AnthropicContent{Type: "thinking", Thinking: thinking})
+	}
+	blocks = append(blocks, AnthropicContent{Type: "text", Text: content})
 	return AnthropicResponse{
-		ID:    id,
-		Type:  "message",
-		Role:  "assistant",
-		Model: model,
-		Content: []AnthropicContent{
-			{Type: "text", Text: content},
-		},
+		ID:         id,
+		Type:       "message",
+		Role:       "assistant",
+		Model:      model,
+		Content:    blocks,
 		StopReason: "end_turn",
 		Usage: AnthropicUsage{
 			InputTokens:  inputTokens,
-			OutputTokens: countTokens(content),
+			OutputTokens: countTokens(thinking + content),
 		},
 	}
 }

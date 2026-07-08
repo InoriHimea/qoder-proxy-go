@@ -779,6 +779,7 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 	var contentBuilder strings.Builder
+	var thinkingBuilder strings.Builder
 	var rawLines []string
 	model := req.Model
 	for scanner.Scan() {
@@ -809,11 +810,13 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 			}
 			for _, choice := range chunk.Choices {
 				contentBuilder.WriteString(choice.Content())
+				thinkingBuilder.WriteString(choice.ReasoningContent())
 			}
 		}
 	}
 
 	finalContent := contentBuilder.String()
+	finalThinking := thinkingBuilder.String()
 	if finalContent == "" {
 		dump := strings.Join(rawLines, " | ")
 		if len(dump) > 2000 {
@@ -822,6 +825,10 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 		AddSystemLog(fmt.Sprintf("CN gateway non-stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
 	}
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	msgMap := map[string]interface{}{"role": "assistant", "content": finalContent}
+	if finalThinking != "" {
+		msgMap["reasoning_content"] = finalThinking
+	}
 	resp := map[string]interface{}{
 		"id":      id,
 		"object":  "chat.completion",
@@ -830,7 +837,7 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 		"choices": []map[string]interface{}{
 			{
 				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": finalContent},
+				"message":       msgMap,
 				"finish_reason": "stop",
 			},
 		},
@@ -841,7 +848,7 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	ctx.SetBody(respBody)
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
-	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalContent), false, time.Since(started).Milliseconds())
+	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
 	return false
 }
 
@@ -885,6 +892,7 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 
 		var fullContent strings.Builder
+		var fullThinking strings.Builder
 		var rawLines []string
 		streamErr := false
 		for scanner.Scan() {
@@ -918,8 +926,13 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 				normalized := false
 				for i, choice := range chunk.Choices {
 					fullContent.WriteString(choice.Content())
+					fullThinking.WriteString(choice.ReasoningContent())
 					if choice.Delta.Content == "" && choice.Message.Content != "" {
 						chunk.Choices[i].Delta.Content = choice.Message.Content
+						normalized = true
+					}
+					if choice.Delta.ReasoningContent == "" && choice.Message.ReasoningContent != "" {
+						chunk.Choices[i].Delta.ReasoningContent = choice.Message.ReasoningContent
 						normalized = true
 					}
 				}
@@ -959,7 +972,7 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 		}
 
 		sys, prompt := extractSystemAndPrompt(req.Messages)
-		um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(fullThinking.String()+fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 
 	return false

@@ -36,9 +36,10 @@ type Message struct {
 }
 
 type ChatChunkDelta struct {
-	Role      string        `json:"role,omitempty"`
-	Content   string        `json:"content,omitempty"`
-	ToolCalls []interface{} `json:"tool_calls,omitempty"`
+	Role             string        `json:"role,omitempty"`
+	Content          string        `json:"content,omitempty"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	ToolCalls        []interface{} `json:"tool_calls,omitempty"`
 }
 
 // strPtr returns a pointer to s, used for the optional finish_reason field.
@@ -60,6 +61,15 @@ func (c ChatChunkChoice) Content() string {
 		return c.Delta.Content
 	}
 	return c.Message.Content
+}
+
+// ReasoningContent returns the choice's reasoning text, preferring
+// Delta.ReasoningContent and falling back to Message.ReasoningContent.
+func (c ChatChunkChoice) ReasoningContent() string {
+	if c.Delta.ReasoningContent != "" {
+		return c.Delta.ReasoningContent
+	}
+	return c.Message.ReasoningContent
 }
 
 type ChatChunk struct {
@@ -89,6 +99,9 @@ func extractContentText(content interface{}) string {
 		var sb strings.Builder
 		for _, item := range arr {
 			if m, ok := item.(map[string]interface{}); ok {
+				if t, _ := m["type"].(string); t == "thinking" {
+					continue
+				}
 				if text, ok := m["text"].(string); ok {
 					sb.WriteString(text)
 				} else if text, ok := m["content"].(string); ok {
@@ -101,6 +114,30 @@ func extractContentText(content interface{}) string {
 		return sb.String()
 	}
 	return ""
+}
+
+// extractThinkingText pulls the CLI's {"type":"thinking","thinking":"..."}
+// content blocks out of a stream-json `message.content` array, mirroring
+// extractContentText's shape but collecting only reasoning text.
+func extractThinkingText(content interface{}) string {
+	arr, ok := content.([]interface{})
+	if !ok {
+		return ""
+	}
+	var sb strings.Builder
+	for _, item := range arr {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t != "thinking" {
+			continue
+		}
+		if text, ok := m["thinking"].(string); ok {
+			sb.WriteString(text)
+		}
+	}
+	return sb.String()
 }
 
 // mergeSystemPrompt appends the tool-protocol prompt to the caller's system
@@ -167,12 +204,16 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		scanner.Buffer(buf, 10*1024*1024)
 
 		var fullContent strings.Builder
+		var fullThinking strings.Builder
 		for scanner.Scan() {
 			var line map[string]interface{}
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
 				if msg, ok := line["message"].(map[string]interface{}); ok {
 					if content := extractContentText(msg["content"]); content != "" {
 						fullContent.WriteString(content)
+					}
+					if thinking := extractThinkingText(msg["content"]); thinking != "" {
+						fullThinking.WriteString(thinking)
 					}
 				}
 			}
@@ -183,11 +224,12 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		}
 
 		outStr := fullContent.String()
+		thinkingStr := fullThinking.String()
 		inputTokens := countTokens(fullSystem + "\n" + prompt)
-		respData := buildAnthropicResponse(id, req.Model, outStr, parseToolCallOutput(outStr), inputTokens)
+		respData := buildAnthropicResponse(id, req.Model, outStr, parseToolCallOutput(outStr), inputTokens, thinkingStr)
 		ctx.SetUserValue("response_body", respData)
 		json.NewEncoder(ctx).Encode(respData)
-		um.Record(req.Model, countTokens(prompt), countTokens(outStr), false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), countTokens(thinkingStr+outStr), false, time.Since(started).Milliseconds())
 		return
 	}
 
@@ -211,6 +253,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		scanner.Buffer(buf, 10*1024*1024)
 
 		var fullContent strings.Builder
+		var fullThinking strings.Builder
 		var fragments []string
 		for scanner.Scan() {
 			var line map[string]interface{}
@@ -220,6 +263,9 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 						if content := extractContentText(msg["content"]); content != "" {
 							fullContent.WriteString(content)
 							fragments = append(fragments, content)
+						}
+						if thinking := extractThinkingText(msg["content"]); thinking != "" {
+							fullThinking.WriteString(thinking)
 						}
 					}
 				}
@@ -231,20 +277,28 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		}
 
 		inputTokens := countTokens(fullSystem + "\n" + prompt)
+		thinkingStr := fullThinking.String()
+		writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
+
+		nextIndex := 0
+		if thinkingStr != "" {
+			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: nextIndex, ContentBlock: &AnthropicContent{Type: "thinking", Thinking: ""}})
+			writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: nextIndex, Delta: &AnthropicEventDelta{Type: "thinking_delta", Thinking: thinkingStr}})
+			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: nextIndex})
+			nextIndex++
+		}
+
 		parsed := parseToolCallOutput(fullContent.String())
 		if parsed != nil && parsed.Type == "tool_calls" {
 			if parsed.PrefixText != "" {
-				writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
-				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: 0, Delta: &AnthropicEventDelta{Type: "text_delta", Text: parsed.PrefixText}})
-				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: 0})
+				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: nextIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: nextIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: parsed.PrefixText}})
+				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: nextIndex})
+				nextIndex++
 			}
-			baseIndex := 0
-			if parsed.PrefixText != "" {
-				baseIndex = 1
-			}
-			for i, tc := range parsed.ToolCalls {
-				blockIndex := baseIndex + i
+			for _, tc := range parsed.ToolCalls {
+				blockIndex := nextIndex
+				nextIndex++
 				var input interface{}
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
 					input = map[string]interface{}{}
@@ -264,17 +318,16 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		} else {
-			writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
-			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: 0, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: nextIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
 			for _, frag := range fragments {
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: 0, Delta: &AnthropicEventDelta{Type: "text_delta", Text: frag}})
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: nextIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: frag}})
 			}
-			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: 0})
+			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: nextIndex})
 			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		}
 
-		um.Record(req.Model, inputTokens, countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
+		um.Record(req.Model, inputTokens, countTokens(thinkingStr+fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 }
 
@@ -334,6 +387,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	scanner.Buffer(buf, 10*1024*1024)
 
 	var contentBuilder strings.Builder
+	var thinkingBuilder strings.Builder
 	var cliErrorMsg string
 	for scanner.Scan() {
 		rawLine := scanner.Text()
@@ -342,6 +396,9 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 			if msg, ok := line["message"].(map[string]interface{}); ok {
 				if content := extractContentText(msg["content"]); content != "" {
 					contentBuilder.WriteString(content)
+				}
+				if thinking := extractThinkingText(msg["content"]); thinking != "" {
+					thinkingBuilder.WriteString(thinking)
 				}
 			}
 
@@ -371,6 +428,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	}
 
 	finalContent := contentBuilder.String()
+	finalThinking := thinkingBuilder.String()
 	finalParsedOutput := parseToolCallOutput(finalContent)
 
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
@@ -378,6 +436,9 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	msgMap := map[string]interface{}{
 		"role":    "assistant",
 		"content": finalContent,
+	}
+	if finalThinking != "" {
+		msgMap["reasoning_content"] = finalThinking
 	}
 
 	if finalParsedOutput != nil && finalParsedOutput.Type == "tool_calls" {
@@ -415,7 +476,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	}
 
 	json.NewEncoder(ctx).Encode(resp)
-	um.Record(req.Model, countTokens(prompt), countTokens(finalContent), false, time.Since(started).Milliseconds())
+	um.Record(req.Model, countTokens(prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
 }
 
 func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *ConfigManager, um *UsageManager, started time.Time, toolPrompt string) {
@@ -458,7 +519,9 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		// is plain text; a tool-call payload is instead emitted as one
 		// tool_calls chunk.
 		var fullContent strings.Builder
+		var fullThinking strings.Builder
 		var fragments []string
+		var thinkingFragments []string
 		for scanner.Scan() {
 			var line map[string]interface{}
 			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
@@ -466,6 +529,10 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 					if content := extractContentText(msg["content"]); content != "" {
 						fullContent.WriteString(content)
 						fragments = append(fragments, content)
+					}
+					if thinking := extractThinkingText(msg["content"]); thinking != "" {
+						fullThinking.WriteString(thinking)
+						thinkingFragments = append(thinkingFragments, thinking)
 					}
 				}
 			}
@@ -485,6 +552,10 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			w.Flush()
+		}
+
+		for _, frag := range thinkingFragments {
+			sendChunk(ChatChunkDelta{ReasoningContent: frag}, nil)
 		}
 
 		parsed := parseToolCallOutput(fullContent.String())
@@ -518,7 +589,7 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 			UpdateRequestLogResponse(logID, map[string]interface{}{"streamed_content": fullContent.String()})
 		}
 
-		um.Record(req.Model, countTokens(prompt), countTokens(fullContent.String()), false, time.Since(started).Milliseconds())
+		um.Record(req.Model, countTokens(prompt), countTokens(fullThinking.String()+fullContent.String()), false, time.Since(started).Milliseconds())
 	})
 
 }
