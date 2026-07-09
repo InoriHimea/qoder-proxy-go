@@ -389,6 +389,15 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		}
 
+		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+			parsed := resolvedTools
+			if parsed == nil {
+				parsed = parseToolCallOutput(fullContent.String())
+			}
+			respData := buildAnthropicResponse(id, req.Model, fullContent.String(), parsed, inputTokens, thinkingStr)
+			UpdateRequestLogResponse(logID, respData)
+		}
+
 		um.Record(req.Model, inputTokens, countTokens(thinkingStr+fullContent.String()), false, time.Since(started).Milliseconds())
 		ctx.SetUserValue("log_metrics", &LogMetrics{
 			InputTokens:    inputTokens,
@@ -542,6 +551,7 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 		resp["choices"].([]map[string]interface{})[0]["finish_reason"] = "tool_calls"
 	}
 
+	ctx.SetUserValue("response_body", resp)
 	json.NewEncoder(ctx).Encode(resp)
 	um.Record(req.Model, countTokens(prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
 	ctx.SetUserValue("log_metrics", &LogMetrics{

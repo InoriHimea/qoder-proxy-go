@@ -36,6 +36,17 @@ func NewDirectClient(cm *ConfigManager) *DirectClient {
 	return &DirectClient{Config: cm}
 }
 
+// rawJSONResponseBody wraps a raw HTTP response body so it round-trips
+// through response_body logging (json.Marshal) as the JSON it already is,
+// instead of being base64-encoded (which is what json.Marshal does to a
+// bare []byte). Falls back to the raw string when the body isn't valid JSON.
+func rawJSONResponseBody(b []byte) interface{} {
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	return string(b)
+}
+
 var tokenExchangeCache = make(map[string]string)
 var tokenExchangeMutex sync.RWMutex
 
@@ -316,6 +327,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 						ctx.SetStatusCode(hResp2.StatusCode)
 						ctx.SetContentType(hResp2.Header.Get("Content-Type"))
 						ctx.SetBody(respBody2)
+						ctx.SetUserValue("response_body", rawJSONResponseBody(respBody2))
 						sys, prompt := extractSystemAndPrompt(req.Messages)
 						um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody2)), false, time.Since(started).Milliseconds())
 						ctx.SetUserValue("log_metrics", &LogMetrics{
@@ -341,6 +353,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 			ctx.SetStatusCode(hResp.StatusCode)
 			ctx.SetContentType("application/json")
 			ctx.SetBody(respBody)
+			ctx.SetUserValue("response_body", rawJSONResponseBody(respBody))
 			return false
 		}
 		// Retry once with refreshed token on non-auth errors race
@@ -357,6 +370,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 						ctx.SetStatusCode(hResp2.StatusCode)
 						ctx.SetContentType(hResp2.Header.Get("Content-Type"))
 						ctx.SetBody(respBody2)
+						ctx.SetUserValue("response_body", rawJSONResponseBody(respBody2))
 						sys, prompt := extractSystemAndPrompt(req.Messages)
 						um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody2)), false, time.Since(started).Milliseconds())
 						ctx.SetUserValue("log_metrics", &LogMetrics{
@@ -373,6 +387,7 @@ func (c *DirectClient) HandleChat(ctx *fasthttp.RequestCtx, req ChatRequest, um 
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(string(respBody)), false, time.Since(started).Milliseconds())
+	ctx.SetUserValue("response_body", rawJSONResponseBody(respBody))
 	ctx.SetUserValue("log_metrics", &LogMetrics{
 		InputTokens:  countTokens(sys + "\n" + prompt),
 		OutputTokens: countTokens(string(respBody)),
@@ -862,6 +877,7 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	ctx.SetStatusCode(http.StatusOK)
 	ctx.SetContentType("application/json")
 	ctx.SetBody(respBody)
+	ctx.SetUserValue("response_body", resp)
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
 	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
