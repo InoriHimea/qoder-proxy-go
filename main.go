@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.8.3"
+const serverVersion = "3.8.4"
 
 func main() {
 	startTime = time.Now()
@@ -120,6 +120,17 @@ func main() {
 	})
 
 	// ── OpenAI & Anthropic Routes ───────────────────────────────────────────────
+	// Bare /v1 route: many OpenAI-compatible clients probe the base URL for
+	// connectivity before sending actual requests. Without this, the probe
+	// gets a 404 from the router and the client refuses to proceed.
+	// NOTE: fasthttp/router's radix tree does not allow both "/v1" and "/v1/"
+	// — it panics with "handler already registered". Registering "/v1" alone
+	// is sufficient; the router's RedirectTrailingSlash option handles the
+	// trailing-slash variant automatically.
+	r.GET("/v1", func(ctx *fasthttp.RequestCtx) {
+		ctx.SetContentType("application/json")
+		fmt.Fprintf(ctx, `{"status":"ok","name":"Qoder Go Proxy","version":"%s","endpoints":["/v1/models","/v1/chat/completions","/v1/responses","/v1/messages"]}`, serverVersion)
+	})
 	r.GET("/v1/models", func(ctx *fasthttp.RequestCtx) {
 		handleModels(ctx, cm)
 	})

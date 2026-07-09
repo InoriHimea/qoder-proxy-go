@@ -203,7 +203,8 @@ func handleGetRequestLogs(ctx *fasthttp.RequestCtx) {
 func handleGetRequestLogDetail(ctx *fasthttp.RequestCtx) {
 	id := ctx.UserValue("id").(string)
 	var l RequestLog
-	var bodyStr, respStr, rawLinesStr string
+	var bodyStr, respStr sql.NullString
+	var rawLinesStr sql.NullString
 	err := logDB.QueryRow("SELECT id, timestamp, method, path, status_code, is_sse, body, response_body, stream_raw_lines, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, thinking_tokens FROM request_logs WHERE id = ?", id).
 		Scan(&l.ID, &l.Timestamp, &l.Method, &l.Path, &l.StatusCode, &l.IsSSE, &bodyStr, &respStr, &rawLinesStr, &l.InputTokens, &l.OutputTokens, &l.CacheCreationTokens, &l.CacheReadTokens, &l.ThinkingTokens)
 
@@ -212,9 +213,9 @@ func handleGetRequestLogDetail(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	json.Unmarshal([]byte(bodyStr), &l.Body)
-	json.Unmarshal([]byte(respStr), &l.ResponseBody)
-	l.StreamRawLines = rawLinesStr
+	json.Unmarshal([]byte(bodyStr.String), &l.Body)
+	json.Unmarshal([]byte(respStr.String), &l.ResponseBody)
+	l.StreamRawLines = rawLinesStr.String
 
 	json.NewEncoder(ctx).Encode(l)
 }
