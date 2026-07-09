@@ -251,29 +251,117 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			w.Flush()
 		}
 
-		// The CLI emits whole JSON objects per line — buffer the whole stream to
-		// decide whether to emit a text or tool_use reply, then replay.
+		// True streaming: forward each CLI stdout line's extracted text as soon
+		// as it arrives instead of buffering the whole process output first.
+		// message_start only depends on the already-known prompt/system, so it
+		// can be sent immediately — this is what gets the client its first byte
+		// well before the CLI finishes, avoiding the idle-timeout disconnects
+		// long agentic turns used to trigger.
+		inputTokens := countTokens(fullSystem + "\n" + prompt)
+		writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
+
 		scanner := bufio.NewScanner(stdout)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 10*1024*1024)
 
 		var fullContent strings.Builder
 		var fullThinking strings.Builder
-		var fragments []string
+		classifier := &streamClassifier{}
+
+		nextIndex := 0
+		thinkingOpen, thinkingIndex := false, 0
+		textOpen, textIndex := false, 0
+		var resolvedTools *ParsedToolOutput
+
+		closeThinkingIfOpen := func() {
+			if thinkingOpen {
+				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: thinkingIndex})
+				thinkingOpen = false
+			}
+		}
+		openTextIfNeeded := func() {
+			if !textOpen {
+				textIndex = nextIndex
+				nextIndex++
+				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: textIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+				textOpen = true
+			}
+		}
+
 		for scanner.Scan() {
 			var line map[string]interface{}
-			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-				if line["type"] == "assistant" {
-					if msg, ok := line["message"].(map[string]interface{}); ok {
-						if content := extractContentText(msg["content"]); content != "" {
-							fullContent.WriteString(content)
-							fragments = append(fragments, content)
-						}
-						if thinking := extractThinkingText(msg["content"]); thinking != "" {
-							fullThinking.WriteString(thinking)
-						}
-					}
+			if err := json.Unmarshal(scanner.Bytes(), &line); err != nil || line["type"] != "assistant" {
+				continue
+			}
+			msg, ok := line["message"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			if resolvedTools != nil {
+				// A tool_calls payload was already resolved and its blocks
+				// closed out; keep draining to EOF so the CLI subprocess never
+				// blocks on a full stdout pipe, but stop forwarding/parsing.
+				if content := extractContentText(msg["content"]); content != "" {
+					fullContent.WriteString(content)
 				}
+				if thinking := extractThinkingText(msg["content"]); thinking != "" {
+					fullThinking.WriteString(thinking)
+				}
+				continue
+			}
+
+			if thinking := extractThinkingText(msg["content"]); thinking != "" {
+				fullThinking.WriteString(thinking)
+				if !thinkingOpen {
+					thinkingIndex = nextIndex
+					nextIndex++
+					writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: thinkingIndex, ContentBlock: &AnthropicContent{Type: "thinking", Thinking: ""}})
+					thinkingOpen = true
+				}
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: thinkingIndex, Delta: &AnthropicEventDelta{Type: "thinking_delta", Thinking: thinking}})
+			}
+
+			content := extractContentText(msg["content"])
+			if content == "" {
+				continue
+			}
+			fullContent.WriteString(content)
+
+			plainText, resolved := classifier.feed(content)
+			if plainText != "" {
+				closeThinkingIfOpen()
+				openTextIfNeeded()
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: textIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: plainText}})
+			}
+
+			if resolved != nil {
+				closeThinkingIfOpen()
+				if textOpen {
+					writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: textIndex})
+					textOpen = false
+				}
+				for _, tc := range resolved.ToolCalls {
+					blockIndex := nextIndex
+					nextIndex++
+					var input interface{}
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+						input = map[string]interface{}{}
+					}
+					writeEvent("content_block_start", AnthropicSSEEvent{
+						Type:         "content_block_start",
+						Index:        blockIndex,
+						ContentBlock: &AnthropicContent{Type: "tool_use", ID: generateCallId("toolu_"), Name: tc.Function.Name, Input: input},
+					})
+					writeEvent("content_block_delta", AnthropicSSEEvent{
+						Type:  "content_block_delta",
+						Index: blockIndex,
+						Delta: &AnthropicEventDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
+					})
+					writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: blockIndex})
+				}
+				resolvedTools = resolved
+				// Do not break — keep draining the scanner to EOF below.
 			}
 		}
 
@@ -281,54 +369,23 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			AddSystemLog(fmt.Sprintf("Scanner error in anthropic stream: %v", err), "error", "cli")
 		}
 
-		inputTokens := countTokens(fullSystem + "\n" + prompt)
 		thinkingStr := fullThinking.String()
-		writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
 
-		nextIndex := 0
-		if thinkingStr != "" {
-			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: nextIndex, ContentBlock: &AnthropicContent{Type: "thinking", Thinking: ""}})
-			writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: nextIndex, Delta: &AnthropicEventDelta{Type: "thinking_delta", Thinking: thinkingStr}})
-			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: nextIndex})
-			nextIndex++
-		}
-
-		parsed := parseToolCallOutput(fullContent.String())
-		if parsed != nil && parsed.Type == "tool_calls" {
-			if parsed.PrefixText != "" {
-				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: nextIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: nextIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: parsed.PrefixText}})
-				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: nextIndex})
-				nextIndex++
+		if resolvedTools == nil {
+			if remaining := classifier.flush(); remaining != "" {
+				closeThinkingIfOpen()
+				openTextIfNeeded()
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: textIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: remaining}})
 			}
-			for _, tc := range parsed.ToolCalls {
-				blockIndex := nextIndex
-				nextIndex++
-				var input interface{}
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
-					input = map[string]interface{}{}
-				}
-				writeEvent("content_block_start", AnthropicSSEEvent{
-					Type:         "content_block_start",
-					Index:        blockIndex,
-					ContentBlock: &AnthropicContent{Type: "tool_use", ID: generateCallId("toolu_"), Name: tc.Function.Name, Input: input},
-				})
-				writeEvent("content_block_delta", AnthropicSSEEvent{
-					Type:  "content_block_delta",
-					Index: blockIndex,
-					Delta: &AnthropicEventDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
-				})
-				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: blockIndex})
-			}
-			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
+			// Guarantee at least one non-thinking content block for protocol
+			// compatibility, even on a fully empty reply.
+			closeThinkingIfOpen()
+			openTextIfNeeded()
+			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: textIndex})
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		} else {
-			writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: nextIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
-			for _, frag := range fragments {
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: nextIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: frag}})
-			}
-			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: nextIndex})
-			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		}
 
@@ -526,30 +583,81 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 10*1024*1024)
 
-		// The CLI emits whole JSON objects per line, not token-level deltas, so
-		// a single line may itself be the entire `{"tool_calls": [...]}`
-		// payload (or a fragment of one spread across lines). We can't know
-		// which until the process finishes, so fragments are buffered and only
-		// replayed as content deltas once we've confirmed the assembled output
-		// is plain text; a tool-call payload is instead emitted as one
-		// tool_calls chunk.
+		sendChunk := func(delta ChatChunkDelta, finishReason *string) {
+			chunk := ChatChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model}
+			chunk.Choices = []ChatChunkChoice{{Index: 0, Delta: delta, FinishReason: finishReason}}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			w.Flush()
+		}
+
+		// True streaming: forward each CLI stdout line's extracted text as soon
+		// as it arrives. The CLI emits whole JSON objects per line, not
+		// token-level deltas, so a single line may itself be the entire
+		// `{"tool_calls": [...]}` payload (or a fragment of one spread across
+		// lines) — streamClassifier holds candidate JSON text until it's
+		// confirmed one way or the other, forwarding everything else as soon
+		// as it's safe to.
 		var fullContent strings.Builder
 		var fullThinking strings.Builder
-		var fragments []string
-		var thinkingFragments []string
+		classifier := &streamClassifier{}
+		var resolvedTools *ParsedToolOutput
+
 		for scanner.Scan() {
 			var line map[string]interface{}
-			if err := json.Unmarshal(scanner.Bytes(), &line); err == nil {
-				if msg, ok := line["message"].(map[string]interface{}); ok {
-					if content := extractContentText(msg["content"]); content != "" {
-						fullContent.WriteString(content)
-						fragments = append(fragments, content)
-					}
-					if thinking := extractThinkingText(msg["content"]); thinking != "" {
-						fullThinking.WriteString(thinking)
-						thinkingFragments = append(thinkingFragments, thinking)
-					}
+			if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+				continue
+			}
+			msg, ok := line["message"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			if resolvedTools != nil {
+				// Already emitted the tool_calls chunk; keep draining to EOF so
+				// the CLI subprocess never blocks on a full stdout pipe, but
+				// stop forwarding/parsing.
+				if content := extractContentText(msg["content"]); content != "" {
+					fullContent.WriteString(content)
 				}
+				if thinking := extractThinkingText(msg["content"]); thinking != "" {
+					fullThinking.WriteString(thinking)
+				}
+				continue
+			}
+
+			if thinking := extractThinkingText(msg["content"]); thinking != "" {
+				fullThinking.WriteString(thinking)
+				sendChunk(ChatChunkDelta{ReasoningContent: thinking}, nil)
+			}
+
+			content := extractContentText(msg["content"])
+			if content == "" {
+				continue
+			}
+			fullContent.WriteString(content)
+
+			plainText, resolved := classifier.feed(content)
+			if plainText != "" {
+				sendChunk(ChatChunkDelta{Content: plainText}, nil)
+			}
+
+			if resolved != nil {
+				var tcs []interface{}
+				for i, tc := range resolved.ToolCalls {
+					tcs = append(tcs, map[string]interface{}{
+						"index": i,
+						"id":    tc.ID,
+						"type":  "function",
+						"function": map[string]interface{}{
+							"name":      tc.Function.Name,
+							"arguments": tc.Function.Arguments,
+						},
+					})
+				}
+				sendChunk(ChatChunkDelta{ToolCalls: tcs}, strPtr("tool_calls"))
+				resolvedTools = resolved
+				// Do not break — keep draining the scanner to EOF below.
 			}
 		}
 
@@ -561,39 +669,9 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 			}
 		}
 
-		sendChunk := func(delta ChatChunkDelta, finishReason *string) {
-			chunk := ChatChunk{ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model}
-			chunk.Choices = []ChatChunkChoice{{Index: 0, Delta: delta, FinishReason: finishReason}}
-			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", data)
-			w.Flush()
-		}
-
-		for _, frag := range thinkingFragments {
-			sendChunk(ChatChunkDelta{ReasoningContent: frag}, nil)
-		}
-
-		parsed := parseToolCallOutput(fullContent.String())
-		if parsed != nil && parsed.Type == "tool_calls" {
-			if parsed.PrefixText != "" {
-				sendChunk(ChatChunkDelta{Content: parsed.PrefixText}, nil)
-			}
-			var tcs []interface{}
-			for i, tc := range parsed.ToolCalls {
-				tcs = append(tcs, map[string]interface{}{
-					"index": i,
-					"id":    tc.ID,
-					"type":  "function",
-					"function": map[string]interface{}{
-						"name":      tc.Function.Name,
-						"arguments": tc.Function.Arguments,
-					},
-				})
-			}
-			sendChunk(ChatChunkDelta{ToolCalls: tcs}, strPtr("tool_calls"))
-		} else {
-			for _, frag := range fragments {
-				sendChunk(ChatChunkDelta{Content: frag}, nil)
+		if resolvedTools == nil {
+			if remaining := classifier.flush(); remaining != "" {
+				sendChunk(ChatChunkDelta{Content: remaining}, nil)
 			}
 		}
 

@@ -308,3 +308,139 @@ func generateCallId(prefix string) string {
 	rand.Read(buf)
 	return prefix + hex.EncodeToString(buf)
 }
+
+// ── Incremental stream classifier ───────────────────────────────────────────
+//
+// The CLI emits whole JSON objects per stdout line, and each line's extracted
+// content is an incremental text fragment. Plain-text fragments must be
+// forwarded to the client immediately; a fragment that starts building a
+// `{"tool_calls":[...]}` payload must NOT be forwarded as text — it has to be
+// held until the payload is complete (or proven not to be one) and turned
+// into a proper tool_use/tool_calls event instead.
+//
+// streamClassifier re-runs the existing whole-string parseToolCallOutput on
+// the held suffix after every new fragment rather than hand-rolling an
+// incremental brace counter — tool_calls payloads are realistically a few KB
+// and fragments arrive at CLI-line granularity, so re-parsing is cheap, and
+// this guarantees identical results to the non-streaming code path by
+// construction (same function, same priority rules).
+
+type streamClassifier struct {
+	held strings.Builder
+}
+
+// maxHeldBytes caps how much text we'll hold waiting for a JSON payload to
+// balance before giving up and flushing it as plain text (protects against a
+// pathological unbalanced `{` never closing for the rest of the response).
+const maxHeldBytes = 256 * 1024
+
+// feed appends the next fragment (one CLI stdout line's extracted content
+// text). It returns plainText, which the caller must forward immediately as
+// a content delta, and resolved, which is non-nil exactly when a complete
+// tool_calls payload was just validated. The caller must stop treating
+// subsequent feed() output as forwardable content once resolved != nil for
+// this classifier instance (there is at most one tool_calls payload per
+// response, matching parseToolCallOutput's contract) — it should keep
+// draining the underlying scanner to EOF regardless, just without forwarding.
+func (s *streamClassifier) feed(fragment string) (plainText string, resolved *ParsedToolOutput) {
+	if fragment == "" && s.held.Len() == 0 {
+		return "", nil
+	}
+	candidate := s.held.String() + fragment
+	s.held.Reset()
+
+	idx := earliestTriggerIndex(candidate)
+	if idx < 0 {
+		return candidate, nil
+	}
+	safe, tail := candidate[:idx], candidate[idx:]
+
+	// If tail has an opened ```json fence with no closing ``` yet,
+	// extractToolCallJSON's Path1 (fenced match) can't succeed OR fail
+	// definitively — calling parseToolCallOutput now would let Path2 (bare
+	// brace scan) jump ahead, since a balanced `{...}` can appear inside the
+	// fence well before the closing marker arrives. That would both resolve
+	// too early and leak the fence syntax itself into PrefixText. Hold until
+	// the fence closes (or maxHeldBytes gives up) so Path1 gets first look,
+	// exactly as it would against the whole buffer.
+	if fenceOpenNotClosed(tail) {
+		if len(tail) > maxHeldBytes {
+			return safe + tail, nil
+		}
+		s.held.WriteString(tail)
+		return safe, nil
+	}
+
+	parsed := parseToolCallOutput(tail)
+	if parsed.Type == "tool_calls" {
+		return safe + parsed.PrefixText, parsed
+	}
+	if len(tail) > maxHeldBytes {
+		return safe + tail, nil
+	}
+	s.held.WriteString(tail)
+	return safe, nil
+}
+
+// fenceOpenNotClosed reports whether s contains a ```json fence marker not
+// yet followed by a closing ```.
+func fenceOpenNotClosed(s string) bool {
+	idx := strings.Index(s, "```json")
+	if idx < 0 {
+		return false
+	}
+	return !strings.Contains(s[idx+len("```json"):], "```")
+}
+
+// flush returns any text still held with no resolution (end of stream
+// reached without ever completing/confirming a tool_calls payload) — it is
+// plain text that was never provably JSON.
+func (s *streamClassifier) flush() string {
+	remaining := s.held.String()
+	s.held.Reset()
+	return remaining
+}
+
+// earliestTriggerIndex returns the position of the earliest possible start
+// of a tool_calls payload (a fenced ```json marker, a bare '{', or a suffix
+// that could still grow into a fenced marker once more text arrives), or -1
+// if none appears. This is intentionally cheap/approximate — it only needs
+// to find a safe cut point before which text can never be part of a
+// candidate; parseToolCallOutput (unchanged) remains the sole authority on
+// whether what follows actually IS a tool_calls payload.
+func earliestTriggerIndex(s string) int {
+	idx := -1
+	if fenced := strings.Index(s, "```json"); fenced >= 0 {
+		idx = fenced
+	}
+	if brace := strings.IndexByte(s, '{'); brace >= 0 && (idx < 0 || brace < idx) {
+		idx = brace
+	}
+	// A fence marker can be split across two fragments (e.g. one fragment
+	// ends in "``" and the next starts with "`json"). If the tail of s is a
+	// proper prefix of "```json", hold from there instead of forwarding what
+	// might turn out to be half a fence marker as plain text.
+	if l := partialFenceSuffixLen(s); l > 0 {
+		if partialIdx := len(s) - l; idx < 0 || partialIdx < idx {
+			idx = partialIdx
+		}
+	}
+	return idx
+}
+
+// partialFenceSuffixLen returns the length of the longest suffix of s that is
+// also a non-empty, proper prefix of the "```json" fence marker. Returns 0
+// when no such suffix exists.
+func partialFenceSuffixLen(s string) int {
+	const marker = "```json"
+	max := len(marker) - 1
+	if len(s) < max {
+		max = len(s)
+	}
+	for l := max; l > 0; l-- {
+		if strings.HasSuffix(s, marker[:l]) {
+			return l
+		}
+	}
+	return 0
+}
