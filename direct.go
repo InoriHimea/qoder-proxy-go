@@ -853,7 +853,9 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 		if len(dump) > 2000 {
 			dump = dump[:2000]
 		}
-		AddSystemLog(fmt.Sprintf("CN gateway non-stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+		AddSystemLog(fmt.Sprintf("CN gateway produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+		AddSystemLog("Falling back to CLI mode due to empty CN gateway response", "warn", "direct")
+		return true
 	}
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	msgMap := map[string]interface{}{"role": "assistant", "content": finalContent}
@@ -1008,6 +1010,12 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 				dump = dump[:2000]
 			}
 			AddSystemLog(fmt.Sprintf("CN gateway stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+			// Can't return true from inside SetBodyStreamWriter (SSE headers already sent),
+			// so send an error event with a special code so the client knows to retry.
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]interface{}{
+				"error": map[string]interface{}{"message": "CN gateway returned empty content", "code": 502},
+			}))
+			w.Flush()
 		}
 
 		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
@@ -1135,7 +1143,9 @@ func (c *DirectClient) handleAnthropicChatCN(ctx *fasthttp.RequestCtx, req Anthr
 		if len(dump) > 2000 {
 			dump = dump[:2000]
 		}
-		AddSystemLog(fmt.Sprintf("CN gateway non-stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+		AddSystemLog(fmt.Sprintf("CN gateway produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+		AddSystemLog("Falling back to CLI mode due to empty CN gateway response", "warn", "direct")
+		return true
 	}
 
 	id := fmt.Sprintf("msg_%d", time.Now().UnixNano())

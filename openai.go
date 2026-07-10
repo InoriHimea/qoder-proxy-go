@@ -425,14 +425,6 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	}
 
 	cfg := cm.Get()
-	if cfg.UseDirectAPI {
-		AddSystemLog(fmt.Sprintf("Using Direct API for %s", req.Model), "info", "direct")
-		fallback := dc.HandleChat(ctx, req, um)
-		if !fallback {
-			return
-		}
-		AddSystemLog("Direct API returned 401/404, falling back to CLI mode automatically...", "info", "system")
-	}
 
 	// Inject a format-only system prompt describing available tools.  The
 	// prompt contains no role-defining statements — it only teaches the model
@@ -440,6 +432,38 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 	var toolPrompt string
 	if len(req.Tools) > 0 {
 		toolPrompt = buildToolSystemPromptFromRaw(req.Tools, false)
+	}
+
+	if cfg.UseDirectAPI {
+		AddSystemLog(fmt.Sprintf("Using Direct API for %s", req.Model), "info", "direct")
+		// Clone the request so tool-prompt injection doesn't mutate the caller's
+		// messages array (important: direct API needs tool definitions baked into
+		// the system message, unlike the CLI path which adds it separately).
+		directReq := req
+		if toolPrompt != "" {
+			directReq.Messages = make([]Message, len(req.Messages))
+			copy(directReq.Messages, req.Messages)
+			// Prepend tool prompt to the existing system message (if any),
+			// or inject a new system message at the top.
+			foundSys := false
+			for i := range directReq.Messages {
+				if strings.ToLower(directReq.Messages[i].Role) == "system" {
+					if s, ok := directReq.Messages[i].Content.(string); ok {
+						directReq.Messages[i].Content = s + "\n\n" + toolPrompt
+					}
+					foundSys = true
+					break
+				}
+			}
+			if !foundSys {
+				directReq.Messages = append([]Message{{Role: "system", Content: toolPrompt}}, directReq.Messages...)
+			}
+		}
+		fallback := dc.HandleChat(ctx, directReq, um)
+		if !fallback {
+			return
+		}
+		AddSystemLog("Direct API returned 401/404, falling back to CLI mode automatically...", "info", "system")
 	}
 
 	if req.Stream {
