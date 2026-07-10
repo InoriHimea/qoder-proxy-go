@@ -17,6 +17,18 @@ import (
 //go:embed write_token.mjs
 var writeTokenScript []byte
 
+//go:embed cli_wrapper.mjs
+var cliWrapperScript []byte
+
+// maxInlineSystemPromptBytes caps how large a --system-prompt value can be
+// passed directly as a command-line argument. Linux enforces a per-argument
+// limit (MAX_ARG_STRLEN, 128KiB) independent of overall ARG_MAX; a prompt
+// past this size makes fork/exec fail with "argument list too long" (E2BIG)
+// no matter how much memory is available. Past this threshold we route
+// through cli_wrapper.mjs instead, which passes the prompt via a temp file
+// and injects it into the CLI's argv in-process (dynamic import, no exec).
+const maxInlineSystemPromptBytes = 100 * 1024
+
 // deviceTokenWriteMu serializes writes to the CLI's on-disk credential file
 // and lets concurrent spawns skip the rewrite when the token hasn't changed
 // since the last write. Without this, concurrent requests each shell out to
@@ -62,6 +74,21 @@ func writeDeviceTokenToKeychain(token, userID, refreshToken string, expireTime i
 		return fmt.Errorf("node exec failed (%w): %s", err, string(output))
 	}
 	return nil
+}
+
+// resolveCliJSPath follows the npm global bin shim (a symlink) for cmdPath
+// to the actual CLI bundle .js file, which is what cli_wrapper.mjs needs to
+// dynamically import in-process.
+func resolveCliJSPath(cmdPath string) (string, error) {
+	binPath, err := exec.LookPath(cmdPath)
+	if err != nil {
+		return "", fmt.Errorf("lookup %s: %w", cmdPath, err)
+	}
+	resolved, err := filepath.EvalSymlinks(binPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve symlink for %s: %w", binPath, err)
+	}
+	return resolved, nil
 }
 
 type SpawnOptions struct {
@@ -114,7 +141,6 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	if sysPrompt == "" {
 		sysPrompt = "You are a helpful AI assistant." // Overrides Qoder's massive default system prompt
 	}
-	args = append(args, "--system-prompt", sysPrompt)
 	if opts.DisableTools {
 		args = append(args, "--tools", "")
 	}
@@ -129,7 +155,35 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 		AddSystemLog("Warning: Personal Access Token is empty in config", "warn", "config")
 	}
 
-	cmd := exec.CommandContext(ctx, cmdPath, args...)
+	var cmd *exec.Cmd
+	var wrapperTempDir string
+	if runtime.GOOS != "windows" && len(sysPrompt) > maxInlineSystemPromptBytes {
+		cliJSPath, resolveErr := resolveCliJSPath(cmdPath)
+		if resolveErr != nil {
+			AddSystemLog(fmt.Sprintf("Cannot resolve CLI entry for large system prompt (%d bytes), passing inline anyway (may fail with E2BIG): %v", len(sysPrompt), resolveErr), "warn", "spawn")
+			cmd = exec.CommandContext(ctx, cmdPath, append(args, "--system-prompt", sysPrompt)...)
+		} else {
+			dir, err := os.MkdirTemp("", "qoder-proxy-wrapper-*")
+			if err != nil {
+				return nil, fmt.Errorf("create wrapper temp dir: %w", err)
+			}
+			wrapperPath := filepath.Join(dir, "cli_wrapper.mjs")
+			spPath := filepath.Join(dir, "system_prompt.txt")
+			if err := os.WriteFile(wrapperPath, cliWrapperScript, 0600); err != nil {
+				os.RemoveAll(dir)
+				return nil, fmt.Errorf("write wrapper script: %w", err)
+			}
+			if err := os.WriteFile(spPath, []byte(sysPrompt), 0600); err != nil {
+				os.RemoveAll(dir)
+				return nil, fmt.Errorf("write system prompt file: %w", err)
+			}
+			wrapperTempDir = dir
+			AddSystemLog(fmt.Sprintf("System prompt (%d bytes) exceeds inline arg limit, routing through cli_wrapper.mjs", len(sysPrompt)), "info", "spawn")
+			cmd = exec.CommandContext(ctx, "node", append([]string{wrapperPath, cliJSPath, spPath}, args...)...)
+		}
+	} else {
+		cmd = exec.CommandContext(ctx, cmdPath, append(args, "--system-prompt", sysPrompt)...)
+	}
 	cmd.Dir = os.TempDir() // Prevent locking into /app directory
 
 	// Set environment
@@ -157,6 +211,9 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	}
 
 	if err := cmd.Start(); err != nil {
+		if wrapperTempDir != "" {
+			os.RemoveAll(wrapperTempDir)
+		}
 		return nil, err
 	}
 
@@ -187,6 +244,9 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	// Wait for process to exit to log its status
 	go func(cmdName string) {
 		err := cmd.Wait()
+		if wrapperTempDir != "" {
+			os.RemoveAll(wrapperTempDir)
+		}
 		if err != nil {
 			AddSystemLog(fmt.Sprintf("CLI %s exited with error: %v", cmdName, err), "error", "process")
 		} else {
