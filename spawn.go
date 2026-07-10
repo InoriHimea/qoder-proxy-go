@@ -11,10 +11,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 //go:embed write_token.mjs
 var writeTokenScript []byte
+
+// deviceTokenWriteMu serializes writes to the CLI's on-disk credential file
+// and lets concurrent spawns skip the rewrite when the token hasn't changed
+// since the last write. Without this, concurrent requests each shell out to
+// write_token.mjs and race on the same credential file — the CLI process can
+// then read a half-written/corrupted file and exit 1 (observed in prod as a
+// burst of request 500s under concurrent load).
+var (
+	deviceTokenWriteMu  sync.Mutex
+	lastWrittenTokenSig string
+)
 
 func writeDeviceTokenToKeychain(token, userID, refreshToken string, expireTime int64, backendName string) error {
 	if token == "" {
@@ -71,10 +83,19 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 	}
 
 	if config.Token != "" {
-		if err := writeDeviceTokenToKeychain(config.Token, config.UserID, config.RefreshToken, config.ExpireTime, backendName); err != nil {
-			AddSystemLog(fmt.Sprintf("Failed to write device token to local storage: %v", err), "error", "spawn")
+		sig := backendName + "|" + config.Token + "|" + config.UserID + "|" + config.RefreshToken + "|" + fmt.Sprintf("%d", config.ExpireTime)
+		deviceTokenWriteMu.Lock()
+		if sig == lastWrittenTokenSig {
+			deviceTokenWriteMu.Unlock()
 		} else {
-			AddSystemLog("Device token successfully written to local storage", "info", "spawn")
+			if err := writeDeviceTokenToKeychain(config.Token, config.UserID, config.RefreshToken, config.ExpireTime, backendName); err != nil {
+				deviceTokenWriteMu.Unlock()
+				AddSystemLog(fmt.Sprintf("Failed to write device token to local storage: %v", err), "error", "spawn")
+			} else {
+				lastWrittenTokenSig = sig
+				deviceTokenWriteMu.Unlock()
+				AddSystemLog("Device token successfully written to local storage", "info", "spawn")
+			}
 		}
 	}
 
