@@ -164,7 +164,15 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 
 	cfg := cm.Get()
 	if cfg.UseDirectAPI {
-		AddSystemLog("Direct API requested but not yet fully implemented for Anthropic protocol. Falling back to CLI.", "warn", "direct")
+		if strings.ToLower(cfg.Backend) == "cn" {
+			AddSystemLog(fmt.Sprintf("Using Direct API (CN) for Anthropic protocol, model %s", req.Model), "info", "direct")
+			if !dc.HandleAnthropicChat(ctx, req, um) {
+				return
+			}
+			AddSystemLog("Direct API (CN) failed, falling back to CLI mode automatically...", "info", "system")
+		} else {
+			AddSystemLog("Direct API requested but not implemented for Anthropic protocol on this backend. Falling back to CLI.", "warn", "direct")
+		}
 	}
 
 	// Inject a format-only system prompt describing available Anthropic tools.

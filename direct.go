@@ -1034,3 +1034,354 @@ func mustJSON(v interface{}) string {
 	}
 	return string(b)
 }
+
+// ── CN gateway transport, Anthropic protocol ────────────────────────────────
+//
+// HandleAnthropicChat/handleAnthropicChatCN/handleAnthropicStreamCN mirror
+// HandleChat/handleChatCN/handleStreamCN above, but speak the Anthropic
+// /v1/messages wire format on both sides instead of OpenAI chat-completions.
+// The CN gateway itself is never told about this — it only ever sees the
+// OpenAI-shape ChatRequest body built by anthropicRequestToChatRequest, and
+// its responses are re-packaged into Anthropic response/SSE shapes using the
+// same buildAnthropicResponse/buildAnthropicStartEvent helpers the CLI path
+// already relies on. Tool calls ride the existing prompt-injection protocol
+// (buildToolSystemPromptFromRaw + parseToolCallOutput) rather than the
+// gateway's native tool-calling fields, matching the CLI path's behavior.
+
+// HandleAnthropicChat is the CN-gateway direct-API entry point for the
+// Anthropic /v1/messages protocol. Only called when cfg.Backend == "cn" —
+// the caller (handleAnthropicMessages) is responsible for that check, same
+// as it already logs-and-skips for other backends.
+func (c *DirectClient) HandleAnthropicChat(ctx *fasthttp.RequestCtx, req AnthropicRequest, um *UsageManager) bool {
+	started := time.Now()
+	if req.Stream {
+		return c.handleAnthropicStreamCN(ctx, req, um, started)
+	}
+	return c.handleAnthropicChatCN(ctx, req, um, started)
+}
+
+func (c *DirectClient) handleAnthropicChatCN(ctx *fasthttp.RequestCtx, req AnthropicRequest, um *UsageManager, started time.Time) bool {
+	cfg := c.Config.Get()
+
+	toolPrompt := ""
+	if len(req.Tools) > 0 {
+		toolPrompt = buildToolSystemPromptFromRaw(req.Tools, true)
+	}
+	chatReq := anthropicRequestToChatRequest(req, toolPrompt)
+
+	bodyJSON, modelKey, source, err := buildCNRequestBody(chatReq, cfg)
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Failed to build CN request body: %v", err), http.StatusInternalServerError)
+		return false
+	}
+
+	hResp, err := c.sendCNRequest(cfg, bodyJSON, modelKey, source)
+	if err != nil {
+		AddSystemLog(fmt.Sprintf("CN gateway request failed: %v", err), "error", "direct")
+		return true
+	}
+	defer hResp.Body.Close()
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 403 {
+		AddSystemLog(fmt.Sprintf("CN gateway still returned %d after resign retry, falling back to CLI", hResp.StatusCode), "warn", "direct")
+		return true
+	}
+	if hResp.StatusCode >= 400 {
+		b, _ := io.ReadAll(hResp.Body)
+		AddSystemLog(fmt.Sprintf("CN gateway returned %d: %s", hResp.StatusCode, string(b)), "warn", "direct")
+		return true
+	}
+
+	scanner := bufio.NewScanner(hResp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var contentBuilder strings.Builder
+	var thinkingBuilder strings.Builder
+	var rawLines []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			rawLines = append(rawLines, line)
+		}
+		data, ok := cutSSEData(line)
+		if !ok {
+			continue
+		}
+		chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
+		if done {
+			break
+		}
+		if errMsg != "" {
+			AddSystemLog(fmt.Sprintf("CN gateway SSE error (status %d): %s", errStatus, errMsg), "error", "direct")
+			ctx.Error(fmt.Sprintf("CN gateway error: %s", errMsg), http.StatusBadGateway)
+			return false
+		}
+		if chunkJSON == nil {
+			continue
+		}
+		var chunk ChatChunk
+		if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
+			for _, choice := range chunk.Choices {
+				contentBuilder.WriteString(choice.Content())
+				thinkingBuilder.WriteString(choice.ReasoningContent())
+			}
+		}
+	}
+
+	finalContent := contentBuilder.String()
+	finalThinking := thinkingBuilder.String()
+	if finalContent == "" {
+		dump := strings.Join(rawLines, " | ")
+		if len(dump) > 2000 {
+			dump = dump[:2000]
+		}
+		AddSystemLog(fmt.Sprintf("CN gateway non-stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+	}
+
+	id := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+	sys, prompt := extractSystemAndPrompt(chatReq.Messages)
+	inputTokens := countTokens(sys + "\n" + prompt)
+	parsed := parseToolCallOutput(finalContent)
+	respData := buildAnthropicResponse(id, req.Model, finalContent, parsed, inputTokens, finalThinking)
+
+	ctx.SetStatusCode(http.StatusOK)
+	ctx.SetContentType("application/json")
+	json.NewEncoder(ctx).Encode(respData)
+	ctx.SetUserValue("response_body", respData)
+
+	um.Record(req.Model, inputTokens, countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
+	ctx.SetUserValue("log_metrics", &LogMetrics{
+		InputTokens:    inputTokens,
+		OutputTokens:   countTokens(finalThinking + finalContent),
+		ThinkingTokens: countTokens(finalThinking),
+	})
+
+	if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+		UpdateRequestLogRawLines(logID, rawLines)
+	}
+
+	return false
+}
+
+func (c *DirectClient) handleAnthropicStreamCN(ctx *fasthttp.RequestCtx, req AnthropicRequest, um *UsageManager, started time.Time) bool {
+	cfg := c.Config.Get()
+
+	toolPrompt := ""
+	if len(req.Tools) > 0 {
+		toolPrompt = buildToolSystemPromptFromRaw(req.Tools, true)
+	}
+	chatReq := anthropicRequestToChatRequest(req, toolPrompt)
+
+	bodyJSON, modelKey, source, err := buildCNRequestBody(chatReq, cfg)
+	if err != nil {
+		ctx.Error(fmt.Sprintf("Failed to build CN request body: %v", err), http.StatusInternalServerError)
+		return false
+	}
+
+	hResp, err := c.sendCNRequest(cfg, bodyJSON, modelKey, source)
+	if err != nil {
+		AddSystemLog(fmt.Sprintf("CN gateway stream request failed: %v", err), "error", "direct")
+		return true
+	}
+
+	if hResp.StatusCode == 401 || hResp.StatusCode == 403 {
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("CN gateway stream still returned %d after resign retry, falling back to CLI", hResp.StatusCode), "warn", "direct")
+		return true
+	}
+	if hResp.StatusCode >= 400 {
+		b, _ := io.ReadAll(hResp.Body)
+		hResp.Body.Close()
+		AddSystemLog(fmt.Sprintf("CN gateway stream returned %d: %s", hResp.StatusCode, string(b)), "warn", "direct")
+		return true
+	}
+
+	ctx.SetContentType("text/event-stream")
+	ctx.Response.Header.Set("Cache-Control", "no-cache")
+	ctx.Response.Header.Set("Connection", "keep-alive")
+	ctx.Response.Header.Set("Transfer-Encoding", "chunked")
+	ctx.SetStatusCode(http.StatusOK)
+
+	sys, prompt := extractSystemAndPrompt(chatReq.Messages)
+	inputTokens := countTokens(sys + "\n" + prompt)
+	id := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+
+	ctx.SetBodyStreamWriter(func(w *bufio.Writer) {
+		defer hResp.Body.Close()
+
+		writeEvent := func(eventType string, data interface{}) {
+			d, _ := json.Marshal(data)
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, d)
+			w.Flush()
+		}
+
+		writeEvent("message_start", buildAnthropicStartEvent(id, req.Model, inputTokens))
+
+		scanner := bufio.NewScanner(hResp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+		classifier := &streamClassifier{}
+		nextIndex := 0
+		thinkingOpen, thinkingIndex := false, 0
+		textOpen, textIndex := false, 0
+		var resolvedTools *ParsedToolOutput
+		var fullContent, fullThinking strings.Builder
+		var rawLines []string
+
+		closeThinkingIfOpen := func() {
+			if thinkingOpen {
+				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: thinkingIndex})
+				thinkingOpen = false
+			}
+		}
+		openTextIfNeeded := func() {
+			if !textOpen {
+				textIndex = nextIndex
+				nextIndex++
+				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: textIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+				textOpen = true
+			}
+		}
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line != "" {
+				rawLines = append(rawLines, line)
+			}
+			data, ok := cutSSEData(line)
+			if !ok {
+				continue
+			}
+			chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
+			if done {
+				break
+			}
+			if errMsg != "" {
+				AddSystemLog(fmt.Sprintf("CN gateway SSE error (status %d): %s", errStatus, errMsg), "error", "direct")
+				writeEvent("error", map[string]interface{}{
+					"type":  "error",
+					"error": map[string]interface{}{"type": "api_error", "message": errMsg},
+				})
+				// Stream already began with a 200 response — can't switch to an
+				// HTTP error status now, just end the stream after the error event.
+				return
+			}
+			if chunkJSON == nil {
+				continue
+			}
+			var chunk ChatChunk
+			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				if resolvedTools != nil {
+					// Already emitted the tool_use blocks; keep draining to EOF
+					// so the gateway response body is fully consumed, but stop
+					// forwarding/parsing (mirrors the CLI stream handler).
+					fullContent.WriteString(choice.Content())
+					fullThinking.WriteString(choice.ReasoningContent())
+					continue
+				}
+
+				thinking := choice.ReasoningContent()
+				if thinking != "" {
+					fullThinking.WriteString(thinking)
+					if !thinkingOpen {
+						thinkingIndex = nextIndex
+						nextIndex++
+						writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: thinkingIndex, ContentBlock: &AnthropicContent{Type: "thinking", Thinking: ""}})
+						thinkingOpen = true
+					}
+					writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: thinkingIndex, Delta: &AnthropicEventDelta{Type: "thinking_delta", Thinking: thinking}})
+				}
+
+				content := choice.Content()
+				if content == "" {
+					continue
+				}
+				fullContent.WriteString(content)
+
+				plainText, resolved := classifier.feed(content)
+				if plainText != "" {
+					closeThinkingIfOpen()
+					openTextIfNeeded()
+					writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: textIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: plainText}})
+				}
+
+				if resolved != nil {
+					closeThinkingIfOpen()
+					if textOpen {
+						writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: textIndex})
+						textOpen = false
+					}
+					for _, tc := range resolved.ToolCalls {
+						blockIndex := nextIndex
+						nextIndex++
+						var input interface{}
+						if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
+							input = map[string]interface{}{}
+						}
+						writeEvent("content_block_start", AnthropicSSEEvent{
+							Type:         "content_block_start",
+							Index:        blockIndex,
+							ContentBlock: &AnthropicContent{Type: "tool_use", ID: generateCallId("toolu_"), Name: tc.Function.Name, Input: input},
+						})
+						writeEvent("content_block_delta", AnthropicSSEEvent{
+							Type:  "content_block_delta",
+							Index: blockIndex,
+							Delta: &AnthropicEventDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
+						})
+						writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: blockIndex})
+					}
+					resolvedTools = resolved
+					// Do not break — keep draining the scanner to EOF below.
+				}
+			}
+		}
+
+		thinkingStr := fullThinking.String()
+
+		if resolvedTools == nil {
+			if remaining := classifier.flush(); remaining != "" {
+				closeThinkingIfOpen()
+				openTextIfNeeded()
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: textIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: remaining}})
+			}
+			closeThinkingIfOpen()
+			openTextIfNeeded()
+			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: textIndex})
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
+			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
+		} else {
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
+			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
+		}
+
+		if fullContent.Len() == 0 {
+			dump := strings.Join(rawLines, " | ")
+			if len(dump) > 2000 {
+				dump = dump[:2000]
+			}
+			AddSystemLog(fmt.Sprintf("CN gateway stream produced empty content, raw SSE lines: %s", dump), "warn", "direct")
+		}
+
+		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {
+			parsed := resolvedTools
+			if parsed == nil {
+				parsed = parseToolCallOutput(fullContent.String())
+			}
+			respData := buildAnthropicResponse(id, req.Model, fullContent.String(), parsed, inputTokens, thinkingStr)
+			UpdateRequestLogResponse(logID, respData)
+			UpdateRequestLogRawLines(logID, rawLines)
+		}
+
+		um.Record(req.Model, inputTokens, countTokens(thinkingStr+fullContent.String()), false, time.Since(started).Milliseconds())
+		ctx.SetUserValue("log_metrics", &LogMetrics{
+			InputTokens:    inputTokens,
+			OutputTokens:   countTokens(thinkingStr + fullContent.String()),
+			ThinkingTokens: countTokens(thinkingStr),
+		})
+	})
+
+	return false
+}

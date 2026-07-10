@@ -245,6 +245,33 @@ func buildAnthropicFullResponse(id string, model string, content string, inputTo
 	}
 }
 
+// anthropicRequestToChatRequest converts an Anthropic-protocol request into
+// the internal ChatRequest shape so it can flow through the existing CN
+// gateway pipeline (buildCNRequestBody/sendCNRequest) unchanged. Tool
+// round-trips (tool_use/tool_result blocks) are flattened into
+// <tool_use>/<tool_result> tagged text via normalizeAnthropicContent — the
+// same prompt-injection representation the CLI path already uses — rather
+// than mapped to the gateway's native tool-calling fields.
+func anthropicRequestToChatRequest(req AnthropicRequest, toolPrompt string) ChatRequest {
+	fullSystem := mergeSystemPrompt(normalizeAnthropicSystem(req.System), toolPrompt)
+
+	var messages []Message
+	if fullSystem != "" {
+		messages = append(messages, Message{Role: "system", Content: fullSystem})
+	}
+	for _, m := range req.Messages {
+		messages = append(messages, Message{Role: m.Role, Content: normalizeAnthropicContent(m.Content)})
+	}
+
+	return ChatRequest{
+		Model:           req.Model,
+		Messages:        messages,
+		Stream:          req.Stream,
+		MaxTokens:       req.MaxTokens,
+		ReasoningEffort: req.ReasoningEffort,
+	}
+}
+
 func buildAnthropicStartEvent(id string, model string, inputTokens int) AnthropicSSEEvent {
 	return AnthropicSSEEvent{
 		Type: "message_start",
