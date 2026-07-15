@@ -81,8 +81,8 @@ type AnthropicEventDelta struct {
 // normalizeAnthropicContent flattens an Anthropic message `content` field —
 // a plain string or an array of typed blocks (text/tool_result/tool_use/
 // image/thinking/document) — into a single text blob the CLI can read. Tool
-// round-trips are preserved as <tool_use>/<tool_result> tagged text so the
-// model can see its own prior calls and their results in history.
+// round-trips keep tool_use in the instructed fenced-JSON format and
+// tool_result in tagged text so the model can see prior calls and results.
 func normalizeAnthropicContent(content interface{}) string {
 	if content == nil {
 		return ""
@@ -121,7 +121,6 @@ func normalizeAnthropicContent(content interface{}) string {
 			}
 		case "tool_use":
 			name, _ := part["name"].(string)
-			id, _ := part["id"].(string)
 			input := part["input"]
 			if input == nil {
 				input = map[string]interface{}{}
@@ -130,7 +129,16 @@ func normalizeAnthropicContent(content interface{}) string {
 			if err != nil {
 				inputJSON = []byte("{}")
 			}
-			parts = append(parts, fmt.Sprintf("<tool_use name=\"%s\" id=\"%s\">\n%s\n</tool_use>", name, id, string(inputJSON)))
+			callJSON, err := json.Marshal(map[string]interface{}{
+				"tool_calls": []map[string]interface{}{
+					{"name": name, "arguments": json.RawMessage(inputJSON)},
+				},
+			})
+			if err != nil {
+				callJSON = []byte(fmt.Sprintf(`{"tool_calls":[{"name":%q,"arguments":{}}]}`, name))
+			}
+			// Match the instructed output format so later turns do not imitate XML tags.
+			parts = append(parts, fmt.Sprintf("```json\n%s\n```", string(callJSON)))
 		case "image":
 			mediaType := "unknown"
 			if src, ok := part["source"].(map[string]interface{}); ok {
@@ -248,10 +256,10 @@ func buildAnthropicFullResponse(id string, model string, content string, inputTo
 // anthropicRequestToChatRequest converts an Anthropic-protocol request into
 // the internal ChatRequest shape so it can flow through the existing CN
 // gateway pipeline (buildCNRequestBody/sendCNRequest) unchanged. Tool
-// round-trips (tool_use/tool_result blocks) are flattened into
-// <tool_use>/<tool_result> tagged text via normalizeAnthropicContent — the
-// same prompt-injection representation the CLI path already uses — rather
-// than mapped to the gateway's native tool-calling fields.
+// round-trips (tool_use/tool_result blocks) are flattened via
+// normalizeAnthropicContent — using the same prompt-injection representation
+// the CLI path already uses — rather than mapped to the gateway's native
+// tool-calling fields.
 func anthropicRequestToChatRequest(req AnthropicRequest, toolPrompt string) ChatRequest {
 	fullSystem := mergeSystemPrompt(normalizeAnthropicSystem(req.System), toolPrompt)
 

@@ -180,3 +180,33 @@ func TestStreamClassifierMaxHeldBytesFallbackAcrossFragments(t *testing.T) {
 		t.Fatalf("expected forwarded text to be non-empty")
 	}
 }
+
+func TestNormalizeAnthropicToolUseMatchesExpectedOutputFormat(t *testing.T) {
+	content := []interface{}{
+		map[string]interface{}{
+			"type":  "tool_use",
+			"id":    "toolu_test",
+			"name":  "Write",
+			"input": map[string]interface{}{"file_path": "round2.txt", "content": "turn two"},
+		},
+	}
+
+	got := normalizeAnthropicContent(content)
+	if strings.Contains(got, "<tool_use") {
+		t.Fatalf("history must not contain XML tool_use tags: %q", got)
+	}
+	if !strings.HasPrefix(got, "```json\n") || !strings.HasSuffix(got, "\n```") {
+		t.Fatalf("history must use fenced JSON: %q", got)
+	}
+	parsed := parseToolCallOutput(got)
+	if parsed.Type != "tool_calls" || len(parsed.ToolCalls) != 1 {
+		t.Fatalf("history must parse as one tool call: %+v", parsed)
+	}
+	call := parsed.ToolCalls[0]
+	if call.Function.Name != "Write" {
+		t.Fatalf("tool name = %q, want Write", call.Function.Name)
+	}
+	if call.Function.Arguments != `{"content":"turn two","file_path":"round2.txt"}` {
+		t.Fatalf("arguments = %q", call.Function.Arguments)
+	}
+}

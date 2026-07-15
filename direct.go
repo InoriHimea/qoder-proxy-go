@@ -666,6 +666,9 @@ func (c *DirectClient) refreshCNIdentity(cfg Config) Config {
 		ctxTO, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if info, err := oc.GetUserInfo(ctxTO, cfg.Token); err == nil {
+			if info.UserID != "" {
+				cfg.UserID = info.UserID
+			}
 			if info.OrganizationID != "" {
 				cfg.OrganizationID = info.OrganizationID
 			}
@@ -685,6 +688,12 @@ func (c *DirectClient) refreshCNIdentity(cfg Config) Config {
 // retrying once on 401/403 (mirrors QEn()'s force-refresh-then-resign loop).
 func (c *DirectClient) sendCNRequest(cfg Config, bodyJSON []byte, modelKey, source string) (*http.Response, error) {
 	client := newDirectHTTPClient(cfg)
+
+	// A blank UserID makes the CN gateway return 500 instead of an auth status.
+	if cfg.UserID == "" && cfg.Token != "" {
+		AddSystemLog("CN direct: user_id empty, backfilling identity from userinfo before signing", "info", "direct")
+		cfg = c.refreshCNIdentity(cfg)
+	}
 
 	doOnce := func(cfg Config) (*http.Response, error) {
 		signed, err := c.signCNRequest(cfg, bodyJSON, modelKey, source)
