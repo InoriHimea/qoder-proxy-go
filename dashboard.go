@@ -76,8 +76,13 @@ func handleStatus(ctx *fasthttp.RequestCtx) {
 }
 
 func handleConfig(ctx *fasthttp.RequestCtx) {
+	scheme := "http"
+	forwardedProto := strings.ToLower(strings.TrimSpace(strings.Split(string(ctx.Request.Header.Peek("X-Forwarded-Proto")), ",")[0]))
+	if forwardedProto == "https" {
+		scheme = "https"
+	}
 	resp := map[string]interface{}{
-		"publicBaseUrl": fmt.Sprintf("http://%s", ctx.Host()),
+		"publicBaseUrl": fmt.Sprintf("%s://%s", scheme, ctx.Host()),
 		"version":       serverVersion + "-go",
 	}
 	json.NewEncoder(ctx).Encode(resp)

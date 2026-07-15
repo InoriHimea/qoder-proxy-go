@@ -6,6 +6,7 @@ const state = {
   page: 'endpoints',
   config: {},
   settings: { backend: 'global', token: '', hasToken: false, models: [] },
+  status: { status: 'unknown', uptime: 0, memoryMB: '—', version: '' },
   models: [],
   chat: { messages: [], model: 'auto', streaming: false, streamMode: 'stream' },
   logs: { entries: [], filter: '', autoRefresh: false, timer: null, expanded: null },
@@ -64,12 +65,21 @@ function syntaxJson(obj) {
   });
 }
 
-function copyText(text, btn) {
-  navigator.clipboard.writeText(text).then(() => {
+window.skipToContent = (event) => {
+  event.preventDefault();
+  $('content').focus();
+};
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
     const orig = btn.textContent;
-    btn.textContent = '✓ Copied'; btn.classList.add('copied');
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
     setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1800);
-  });
+  } catch {
+    showToast('Copy failed — select and copy the value manually.', 'error');
+  }
 }
 
 function showToast(msg, type = 'success') {
@@ -104,28 +114,63 @@ function navigateTo(page) {
   state.page = page;
   window.location.hash = page;
   updateSidebar();
+  closeSidebar();
   routes[page]();
+  $('content').focus({ preventScroll: true });
 }
 
 window.addEventListener('hashchange', () => navigateTo(window.location.hash.slice(1)));
 
 function updateSidebar() {
-  document.querySelectorAll('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.page === state.page));
+  document.querySelectorAll('.nav-item').forEach(a => {
+    const active = a.dataset.page === state.page;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
 }
+
+function closeSidebar(returnFocus = false) {
+  const sidebar = $('sidebar');
+  const toggle = $('menu-toggle');
+  if (!sidebar || !toggle) return;
+  sidebar.classList.remove('open');
+  document.body.classList.remove('sidebar-open');
+  toggle.setAttribute('aria-expanded', 'false');
+  if (returnFocus) toggle.focus();
+}
+
+window.toggleSidebar = () => {
+  const sidebar = $('sidebar');
+  const toggle = $('menu-toggle');
+  if (!sidebar || !toggle) return;
+  const open = !sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', open);
+  document.body.classList.toggle('sidebar-open', open);
+  toggle.setAttribute('aria-expanded', String(open));
+  if (open) sidebar.querySelector('.sidebar-close, .nav-item')?.focus();
+};
 
 // ── Status polling ────────────────────────────────────────────────────────────
 async function fetchStatus() {
   try {
     const d = await api('/dashboard/api/status');
+    state.status = d;
     const dot = $('status-indicator'), lbl = $('status-label');
     dot.className = `status-dot status-${d.status === 'ok' ? 'ok' : 'degraded'}`;
     lbl.textContent = d.status === 'ok' ? 'Online' : 'Degraded';
     lbl.style.color = d.status === 'ok' ? 'var(--success)' : 'var(--error)';
-    $('qodercli-ver').textContent = `qodercli ${d.qodercli || '1.x'}`;
     $('uptime-label').textContent = `Up ${fmtUptime(d.uptime)}`;
     $('mem-label').textContent = `${d.memoryMB} MB`;
     $('sidebar-version').textContent = `v${d.version}`;
-  } catch { /* ignore */ }
+    updateHomeStatus();
+  } catch {
+    state.status = { status: 'unknown', uptime: 0, memoryMB: '—', version: state.status?.version || '' };
+    const dot = $('status-indicator'), lbl = $('status-label');
+    if (dot) dot.className = 'status-dot status-unknown';
+    if (lbl) { lbl.textContent = 'Unavailable'; lbl.style.color = 'var(--text3)'; }
+    updateHomeStatus();
+  }
 }
 
 // ── Page: Account (accounts + quota + usage + config) ──────────────────────────
@@ -300,44 +345,127 @@ async function init() {
 }
 
 // ── Page: Endpoints ───────────────────────────────────────────────────────────
+function updateHomeStatus() {
+  if (state.page !== 'endpoints') return;
+  const status = state.status || {};
+  const homeDot = $('home-status-dot');
+  const homeLabel = $('home-status-label');
+  const homeUptime = $('home-uptime');
+  const homeMemory = $('home-memory');
+  const tone = status.status === 'ok' ? 'ok' : status.status === 'unknown' ? 'unknown' : 'degraded';
+  if (homeDot) homeDot.className = `status-dot status-${tone}`;
+  if (homeLabel) homeLabel.textContent = status.status === 'ok' ? 'Proxy online' : status.status === 'unknown' ? 'Status unavailable' : 'Proxy degraded';
+  if (homeUptime) homeUptime.textContent = status.status === 'unknown' ? 'Uptime unavailable' : `Up ${fmtUptime(status.uptime || 0)}`;
+  if (homeMemory) homeMemory.textContent = `${status.memoryMB || '—'} MB memory`;
+}
+
 function renderEndpoints() {
   const base = state.config.publicBaseUrl || window.location.origin;
-  const v1   = `${base}/v1`;
-  const key  = state.config.proxyApiKey;
+  const v1 = `${base}/v1`;
+  const status = state.status || {};
+  const backend = String(state.settings.backend || 'global').toLowerCase();
+  const direct = Boolean(state.settings.useDirectApi);
+  const hasToken = Boolean(state.settings.hasToken);
+  const modelCount = state.models.length;
 
+  const statusTone = status.status === 'ok' ? 'ok' : status.status === 'unknown' ? 'unknown' : 'degraded';
+  const statusLabel = status.status === 'ok' ? 'Proxy online' : status.status === 'unknown' ? 'Status unavailable' : 'Proxy degraded';
   const endpoints = [
-    { method:'GET',  path:'/v1/models',            desc:'List all available models and aliases.',        curl:`curl ${v1}/models${key ? ` \\\n  -H "Authorization: Bearer ${key}"` : ''}` },
-    { method:'POST', path:'/v1/chat/completions',  desc:'OpenAI-compatible chat completions (streaming supported).', curl:`curl ${v1}/chat/completions \\\n  -H "Content-Type: application/json"${key ? ` \\\n  -H "Authorization: Bearer ${key}"` : ''} \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Hello!"}]}'` },
-    { method:'POST', path:'/v/chat',               desc:'Alias for chat completions.',                   curl:`curl ${base}/v/chat \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Hi!"}]}'` },
-    { method:'POST', path:'/v1/messages',          desc:'Anthropic-compatible messages endpoint.',       curl:`curl ${v1}/messages \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"claude-3-5-sonnet-20240620","messages":[{"role":"user","content":"Hello!"}]}'` },
-    { method:'POST', path:'/responses',            desc:'Codex-style completion endpoint.',              curl:`curl ${base}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Write code"}]}'` },
-    { method:'POST', path:'/v1/responses',         desc:'Codex-style endpoint alias.',                   curl:`curl ${v1}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Code"}]}'` },
-    { method:'GET',  path:'/health',               desc:'Health check — returns server status.',         curl:`curl ${base}/health` },
+    { method:'GET', path:'/v1/models', protocol:'OpenAI', desc:'List configured models and aliases.', curl:`curl ${v1}/models` },
+    { method:'POST', path:'/v1/chat/completions', protocol:'OpenAI', desc:'Chat completions with streaming and tools.', curl:`curl ${v1}/chat/completions \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Hello!"}]}'` },
+    { method:'POST', path:'/v/chat', protocol:'OpenAI', desc:'Short alias for chat completions.', curl:`curl ${base}/v/chat \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Hello!"}]}'` },
+    { method:'POST', path:'/v1/messages', protocol:'Anthropic', desc:'Messages API for Claude Code and Anthropic SDKs.', curl:`curl ${v1}/messages \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'` },
+    { method:'POST', path:'/v1/message', protocol:'Anthropic', desc:'Alias for the Messages API.', curl:`curl ${v1}/message \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","max_tokens":1024,"messages":[{"role":"user","content":"Hello!"}]}'` },
+    { method:'POST', path:'/v1/responses', protocol:'Codex', desc:'Responses compatibility upgrade is planned.', curl:`curl ${v1}/responses \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"auto","messages":[{"role":"user","content":"Write a small Go function"}]}'`, planned:true },
+    { method:'GET', path:'/health', protocol:'Core', desc:'Lightweight health probe.', curl:`curl ${base}/health` },
   ];
 
   const epCards = endpoints.map((ep, i) => `
-    <div class="endpoint-card">
+    <article class="endpoint-card${ep.planned ? ' endpoint-planned' : ''}">
       <div class="ep-header">
         <span class="method-badge method-${ep.method}">${ep.method}</span>
-        <span class="ep-path">${escHtml(ep.path)}</span>
+        <code class="ep-path">${escHtml(ep.path)}</code>
+        <span class="ep-protocol">${escHtml(ep.protocol)}</span>
       </div>
       <div class="ep-body">
         <p class="ep-desc">${escHtml(ep.desc)}</p>
-        <div class="ep-curl" id="curl-${i}">${escHtml(ep.curl)}<button class="copy-curl" onclick="copyText(document.getElementById('curl-${i}').innerText,this)">Copy</button></div>
+        <div class="ep-curl"><code>${escHtml(ep.curl)}</code><button class="copy-curl" type="button" onclick="copyEndpoint(${i},this)" aria-label="Copy ${escHtml(ep.path)} curl command">Copy</button></div>
       </div>
+    </article>`).join('');
+
+  window.endpointCurlCommands = endpoints.map(ep => ep.curl);
+
+  const overview = [
+    { label:'Backend', value:backend === 'cn' ? 'China gateway' : 'Global gateway', meta:backend === 'cn' ? 'CN' : 'GLOBAL', tone:'violet' },
+    { label:'Request path', value:direct ? 'Direct API' : 'CLI bridge', meta:direct ? 'DIRECT' : 'CLI', tone:direct ? 'green' : 'blue' },
+    { label:'Model catalog', value:`${modelCount} model${modelCount === 1 ? '' : 's'}`, meta:modelCount ? 'READY' : 'EMPTY', tone:modelCount ? 'green' : 'amber' },
+    { label:'Account', value:hasToken ? 'Connected' : 'Needs token', meta:hasToken ? 'AUTH' : 'SETUP', tone:hasToken ? 'green' : 'amber' },
+  ].map(item => `
+    <div class="overview-card">
+      <div class="overview-card-top"><span>${item.label}</span><span class="micro-badge micro-${item.tone}">${item.meta}</span></div>
+      <strong>${item.value}</strong>
     </div>`).join('');
 
   $('content').innerHTML = `
-    <div class="page-header"><div><h1 class="page-title">Endpoints</h1><p class="page-sub">Your multi-protocol AI proxy — Drop this URL into any application</p></div></div>
-    <div class="hero-card">
-      <div class="hero-label">🌐 Base URL (OpenAI-compatible)</div>
-      <div class="hero-url" id="hero-url">${escHtml(v1)}</div>
-      <div class="hero-actions">
-        <button class="copy-btn" id="copy-url-btn" onclick="copyText('${v1}',this)">Copy Base URL</button>
+    <section class="home-intro" aria-labelledby="home-title">
+      <div>
+        <p class="eyebrow">Local AI gateway</p>
+        <h1 class="page-title home-title" id="home-title">One endpoint. Every client.</h1>
+        <p class="page-sub">Route OpenAI and Anthropic clients through your Qoder account.</p>
       </div>
-    </div>
-    <div class="endpoint-grid">${epCards}</div>`;
+      <a class="btn btn-ghost" href="#settings" onclick="event.preventDefault();navigateTo('settings')">Manage account</a>
+    </section>
+
+    <section class="hero-card home-hero" aria-label="Proxy base URL">
+      <div class="hero-orbit" aria-hidden="true"></div>
+      <div class="hero-copy">
+        <div class="hero-status">
+          <span id="home-status-dot" class="status-dot status-${statusTone}" aria-hidden="true"></span>
+          <span id="home-status-label">${statusLabel}</span>
+          <span class="hero-divider" aria-hidden="true"></span>
+          <span id="home-uptime">${status.status === 'unknown' ? 'Uptime unavailable' : `Up ${fmtUptime(status.uptime || 0)}`}</span>
+          <span id="home-memory">${status.memoryMB || '—'} MB memory</span>
+        </div>
+        <p class="hero-label">OpenAI-compatible base URL</p>
+        <code class="hero-url" id="hero-url">${escHtml(v1)}</code>
+        <div class="hero-actions">
+          <button class="copy-btn" type="button" onclick="copyText(document.getElementById('hero-url').textContent,this)">Copy base URL</button>
+          <button class="copy-btn-ghost" type="button" onclick="navigateTo('playground')">Open playground</button>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="overview-title">
+      <div class="section-heading"><div><p class="eyebrow">At a glance</p><h2 id="overview-title">Runtime overview</h2></div></div>
+      <div class="overview-grid">${overview}</div>
+    </section>
+
+    <section class="home-split">
+      <div class="card compatibility-panel">
+        <div class="section-heading compact"><div><p class="eyebrow">Protocol coverage</p><h2>Client compatibility</h2></div></div>
+        <div class="compat-list">
+          <div class="compat-row"><span class="compat-mark compat-ready">O</span><div><strong>OpenAI</strong><small>Chat Completions · Models</small></div><span class="status-pill status-ready">Ready</span></div>
+          <div class="compat-row"><span class="compat-mark compat-ready">A</span><div><strong>Anthropic</strong><small>Messages · Tool use · SSE</small></div><span class="status-pill status-ready">Ready</span></div>
+          <div class="compat-row"><span class="compat-mark compat-planned">C</span><div><strong>Codex CLI</strong><small>Responses API</small></div><span class="status-pill status-planned">Upgrade planned</span></div>
+        </div>
+      </div>
+      <div class="card quickstart-panel">
+        <div class="section-heading compact"><div><p class="eyebrow">First request</p><h2>Quick start</h2></div></div>
+        <ol class="quickstart-list">
+          <li><span>1</span><div><strong>Copy the base URL</strong><small>Use the highlighted endpoint above.</small></div></li>
+          <li><span>2</span><div><strong>Configure your client</strong><small>Set <code>base_url</code> to the copied value.</small></div></li>
+          <li><span>3</span><div><strong>Send a request</strong><small>Start with model <code>auto</code>.</small></div></li>
+        </ol>
+      </div>
+    </section>
+
+    <section aria-labelledby="endpoint-title">
+      <div class="section-heading"><div><p class="eyebrow">API surface</p><h2 id="endpoint-title">Endpoints</h2></div><span class="section-count">${endpoints.length} routes</span></div>
+      <div class="endpoint-grid">${epCards}</div>
+    </section>`;
 }
+
+window.copyEndpoint = (index, button) => copyText(window.endpointCurlCommands[index], button);
 
 // ── Page: Playground ──────────────────────────────────────────────────────────
 function renderPlayground() {
@@ -893,8 +1021,11 @@ async function fetchLogs() {
 window.showLogDetail = async (id) => {
   const modal = $('log-modal');
   const body = $('log-modal-body');
+  state.modalLastFocus = document.activeElement;
   modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
   body.innerHTML = '<div class="spinner"></div>';
+  requestAnimationFrame(() => modal.querySelector('.modal-close').focus());
 
   try {
     const data = await api(`/dashboard/api/logs/${id}`);
@@ -957,7 +1088,33 @@ window.showLogDetail = async (id) => {
   } catch (err) { body.innerHTML = `<div class="empty-state" style="color:var(--error)">Failed to load detail: ${err.message}</div>`; }
 };
 
-window.closeLogModal = () => $('log-modal').classList.remove('open');
+window.closeLogModal = () => {
+  const modal = $('log-modal');
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+  if (state.modalLastFocus && document.contains(state.modalLastFocus)) state.modalLastFocus.focus();
+};
+
+window.handleModalOverlayClick = (event) => {
+  if (event.target === $('log-modal')) closeLogModal();
+};
+
+document.addEventListener('keydown', (event) => {
+  const modal = $('log-modal');
+  if (event.key === 'Escape') {
+    if (modal.classList.contains('open')) closeLogModal();
+    else closeSidebar(true);
+    return;
+  }
+  if (event.key !== 'Tab' || !modal.classList.contains('open')) return;
+  const focusable = [...modal.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')]
+    .filter(node => !node.disabled && node.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+
 window.clearLogs = async () => {
   if (!confirm('Clear all request logs?')) return;
   await api('/dashboard/api/logs', { method: 'DELETE' });

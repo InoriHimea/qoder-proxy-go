@@ -22,6 +22,7 @@ body.login-mode{min-height:100vh;display:flex;align-items:center;justify-content
 body.login-mode::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 80% 60% at 50% -10%,rgba(236,72,153,0.16),transparent);pointer-events:none;z-index:0}
 body.login-mode #app{display:none}
 body.login-mode #login-container{display:flex}
+body.login-mode .skip-link{display:none}
 #login-container{display:none;width:100%;justify-content:center;align-items:center;min-height:100vh}
 .login-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:40px;width:100%;max-width:380px;box-shadow:0 24px 64px rgba(0,0,0,0.25);position:relative;z-index:1}        
 .login-logo{display:flex;align-items:center;gap:10px;margin-bottom:28px}
@@ -42,6 +43,8 @@ body.login-mode #login-container{display:flex}
 </style>
 </head>
 <body>
+<a href="#content" class="skip-link" onclick="skipToContent(event)">Skip to main content</a>
+
 <!-- Login View -->
 <div id="login-container">
   <div class="login-card">
@@ -65,15 +68,18 @@ body.login-mode #login-container{display:flex}
 <!-- Dashboard View -->
 <div id="app">
   <!-- Sidebar -->
-  <aside id="sidebar">
+  <aside id="sidebar" aria-label="Primary navigation">
     <div class="sidebar-logo">
-      <div class="logo-icon">Q</div>
+      <div class="logo-icon" aria-hidden="true">Q</div>
       <div class="logo-text-wrap">
         <span class="logo-name">Qoder Proxy</span>
         <span class="logo-tag">Dashboard</span>
       </div>
+      <button class="sidebar-close" type="button" onclick="closeSidebar(true)" aria-label="Close navigation">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav" aria-label="Dashboard">
       <a href="#endpoints"   class="nav-item" data-page="endpoints">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
         Endpoints
@@ -113,30 +119,32 @@ body.login-mode #login-container{display:flex}
   <!-- Main -->
   <div id="main">
     <header id="topbar">
-      <div class="topbar-left">
-        <div id="status-indicator" class="status-dot status-unknown"></div>
+      <button id="menu-toggle" class="menu-toggle" type="button" onclick="toggleSidebar()" aria-controls="sidebar" aria-expanded="false" aria-label="Open navigation">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+      </button>
+      <div class="topbar-left" aria-label="Server status">
+        <div id="status-indicator" class="status-dot status-unknown" aria-hidden="true"></div>
         <span id="status-label" class="status-label">Checking…</span>
-        <span class="sep">·</span>
-        <span id="qodercli-ver" class="topbar-meta"></span>
-        <span class="sep">·</span>
+        <span class="sep" aria-hidden="true">·</span>
         <span id="uptime-label" class="topbar-meta"></span>
-        <span class="sep">·</span>
+        <span class="sep" aria-hidden="true">·</span>
         <span id="mem-label" class="topbar-meta"></span>
       </div>
     </header>
-    <main id="content">
+    <main id="content" tabindex="-1">
       <div class="loading-screen"><div class="spinner"></div></div>
     </main>
   </div>
 </div>
+<div id="sidebar-scrim" class="sidebar-scrim" onclick="closeSidebar(true)" aria-hidden="true"></div>
 
 <!-- Log Detail Modal -->
-<div id="log-modal" class="modal-overlay">
-  <div class="modal">
+<div id="log-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="log-modal-title" aria-hidden="true" onclick="handleModalOverlayClick(event)">
+  <div class="modal" tabindex="-1">
     <div class="modal-header">
       <div class="modal-title" id="log-modal-title">Request Detail</div>
-      <button class="modal-close" onclick="closeLogModal()">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      <button class="modal-close" type="button" onclick="closeLogModal()" aria-label="Close request detail">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
     <div class="modal-body" id="log-modal-body">
