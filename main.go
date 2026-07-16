@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.10.0"
+const serverVersion = "3.11.0"
 
 func main() {
 	startTime = time.Now()
@@ -149,11 +149,11 @@ func main() {
 		handleAnthropicMessages(ctx, cm, um, dc)
 	})
 	r.POST("/responses", func(ctx *fasthttp.RequestCtx) {
-		handleChatCompletions(ctx, cm, um, dc)
+		handleResponses(ctx, cm, um, dc)
 
 	})
 	r.POST("/v1/responses", func(ctx *fasthttp.RequestCtx) {
-		handleChatCompletions(ctx, cm, um, dc)
+		handleResponses(ctx, cm, um, dc)
 
 	})
 
