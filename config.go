@@ -10,10 +10,11 @@ import (
 )
 
 type Model struct {
-	ID          string `json:"id"`
-	Label       string `json:"label"`
-	Tier        string `json:"tier"`
-	Description string `json:"description"`
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	Tier         string `json:"tier"`
+	Description  string `json:"description"`
+	ContextWindow int   `json:"context_window,omitempty"`
 }
 
 // Account holds credentials for a single logged-in Qoder identity.
@@ -69,16 +70,16 @@ type AccountSummary struct {
 }
 
 var DefaultModels = []Model{
-	{ID: "auto", Label: "Auto (Smart Select)", Tier: "paid", Description: "Paid tier — automatically selects the best model per task."},
-	{ID: "ultimate", Label: "Ultimate (Best Quality)", Tier: "paid", Description: "Paid tier — top-tier model, maximum quality."},
-	{ID: "performance", Label: "Performance", Tier: "paid", Description: "Paid tier — high-performance model."},
-	{ID: "qmodel_latest", Label: "Qwen3.7-Max", Tier: "new", Description: "New model — Qwen 3.7 Max (Alibaba)."},
-	{ID: "qmodel", Label: "Qwen 3.6 Plus", Tier: "new", Description: "New model — Qwen 3.6 Plus (Alibaba)."},
-	{ID: "kmodel", Label: "Kimi-K2.6", Tier: "new", Description: "New model — Kimi-K2.6 (Moonshot AI)."},
-	{ID: "mmodel", Label: "MiniMax-M2.7", Tier: "new", Description: "New model — MiniMax-M2.7."},
-	{ID: "dmodel", Label: "DeepSeek-V4-Pro", Tier: "new", Description: "New model — DeepSeek V4 Pro, reasoning-capable."},
-	{ID: "dfmodel", Label: "DeepSeek-V4-Flash", Tier: "new", Description: "New model — DeepSeek V4 Flash, fast and lightweight."},
-	{ID: "gm51model", Label: "GLM-5.1", Tier: "new", Description: "New model — GLM-5.1 series (Zhipu AI)."},
+	{ID: "auto", Label: "Auto (Smart Select)", Tier: "paid", Description: "Paid tier - automatically selects the best model per task.", ContextWindow: 128000},
+	{ID: "ultimate", Label: "Ultimate (Best Quality)", Tier: "paid", Description: "Paid tier - top-tier model, maximum quality.", ContextWindow: 128000},
+	{ID: "performance", Label: "Performance", Tier: "paid", Description: "Paid tier - high-performance model.", ContextWindow: 128000},
+	{ID: "qmodel_latest", Label: "Qwen3.7-Max", Tier: "new", Description: "New model - Qwen 3.7 Max (Alibaba).", ContextWindow: 128000},
+	{ID: "qmodel", Label: "Qwen 3.6 Plus", Tier: "new", Description: "New model - Qwen 3.6 Plus (Alibaba).", ContextWindow: 128000},
+	{ID: "kmodel", Label: "Kimi-K2.6", Tier: "new", Description: "New model - Kimi-K2.6 (Moonshot AI).", ContextWindow: 128000},
+	{ID: "mmodel", Label: "MiniMax-M2.7", Tier: "new", Description: "New model - MiniMax-M2.7.", ContextWindow: 128000},
+	{ID: "dmodel", Label: "DeepSeek-V4-Pro", Tier: "new", Description: "DeepSeek V4 Pro, reasoning-capable.", ContextWindow: 128000},
+	{ID: "dfmodel", Label: "DeepSeek-V4-Flash", Tier: "new", Description: "DeepSeek V4 Flash, fast and lightweight.", ContextWindow: 128000},
+	{ID: "gm51model", Label: "GLM-5.1", Tier: "new", Description: "New model - GLM-5.1 series (Zhipu AI).", ContextWindow: 128000},
 }
 
 type ConfigManager struct {
@@ -162,7 +163,7 @@ func (cm *ConfigManager) Load() error {
 		return nil
 	}
 
-	// Legacy flat format — migrate in place.
+	// Legacy flat format - migrate in place.
 	var old Config
 	if err := json.Unmarshal(data, &old); err != nil {
 		return err
@@ -217,7 +218,7 @@ func (cm *ConfigManager) Update(newCfg Config) error {
 	defer cm.mu.Unlock()
 	a := cm.activeAccount()
 	if a == nil {
-		// No accounts yet — create one.
+		// No accounts yet - create one.
 		a = &Account{
 			ID:        "default",
 			Name:      "Default",
@@ -317,11 +318,7 @@ func (cm *ConfigManager) RemoveAccount(id string) error {
 		}
 		newAccs = append(newAccs, a)
 	}
-	if !found {
-		return nil
-	}
-	// Cannot delete last account.
-	if len(newAccs) == 0 {
+	if !found || len(newAccs) == 0 {
 		return nil
 	}
 	cm.cfg.Accounts = newAccs
@@ -329,6 +326,19 @@ func (cm *ConfigManager) RemoveAccount(id string) error {
 		cm.cfg.ActiveAccountID = newAccs[0].ID
 	}
 	return cm.saveNoLock()
+}
+
+// modelContextWindow returns the context window (max input tokens) for the
+// given model ID across the merged default + config model lists. Returns 0
+// when unknown - the caller should treat that as "skip the check" rather
+// than "reject everything".
+func modelContextWindow(models []Model, modelID string) int {
+	for _, m := range models {
+		if m.ID == modelID {
+			return m.ContextWindow
+		}
+	}
+	return 0
 }
 
 func maskToken(t string) string {

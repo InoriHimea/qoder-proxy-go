@@ -150,16 +150,23 @@ func formatToolResultForPrompt(toolResults []map[string]interface{}) string {
 // ── CLI output parser ───────────────────────────────────────────────────────
 
 // parseToolCallOutput examines the raw text output from qodercli and extracts
-// any tool calls.  Two shapes are supported:
+// any tool calls.  Three shapes are supported:
 //
 //  1. A fenced ```json ... ``` block whose body is `{"tool_calls": [...]}`.
 //  2. A bare balanced JSON object containing "tool_calls" (model forgot the
 //     markdown fences) — found via brace-counting, not a lazy regex.
+//  3. GLM-style <tool_call> blocks: tag name is tool name, body is key:value args
+//     (one per line, or raw string for the tool to interpret).
 //
 // Returns type="text" when no valid tool_calls are found.
 func parseToolCallOutput(text string) *ParsedToolOutput {
 	if strings.TrimSpace(text) == "" {
 		return &ParsedToolOutput{Type: "text", PrefixText: text}
+	}
+
+	// Path 3 — GLM-style <tool_call> blocks with newline-delimited content.
+	if calls, prefix, ok := parseGLMToolCalls(text); ok {
+		return &ParsedToolOutput{Type: "tool_calls", PrefixText: prefix, ToolCalls: calls}
 	}
 
 	jsonString, prefixText := extractToolCallJSON(text)
@@ -243,6 +250,114 @@ func extractToolCallJSON(text string) (jsonStr, prefixText string) {
 		}
 	}
 	return "", ""
+}
+
+// parseGLMToolCalls detects GLM-style <tool_call> wrappers and converts them
+// to the proxy's internal ToolCall structs. The first body line is the tool
+// name; the remaining body is its arguments.
+func parseGLMToolCalls(text string) (calls []ToolCall, prefix string, ok bool) {
+	const openTag = "<tool_call>"
+	const closeTag = "</tool_call>"
+
+	searchFrom := 0
+	now := time.Now().UnixNano()
+	for {
+		relStart := strings.Index(strings.ToLower(text[searchFrom:]), openTag)
+		if relStart < 0 {
+			break
+		}
+		tagStart := searchFrom + relStart
+		bodyStart := tagStart + len(openTag)
+		relEnd := strings.Index(strings.ToLower(text[bodyStart:]), closeTag)
+		if relEnd < 0 {
+			break
+		}
+		closeIdx := bodyStart + relEnd
+		body := strings.TrimSpace(text[bodyStart:closeIdx])
+		searchFrom = closeIdx + len(closeTag)
+
+		lineEnd := strings.IndexByte(body, '\n')
+		if lineEnd < 0 {
+			continue
+		}
+		toolName := strings.TrimSpace(body[:lineEnd])
+		if !validGLMToolName(toolName) {
+			continue
+		}
+		argsBody := strings.TrimSpace(body[lineEnd+1:])
+		argsStr := normalizeGLMToolArguments(argsBody)
+
+		if len(calls) == 0 {
+			prefix = strings.TrimSpace(text[:tagStart])
+		}
+		calls = append(calls, ToolCall{
+			ID:   fmt.Sprintf("call_%d_%d", now, len(calls)),
+			Type: "function",
+			Function: ToolCallFunction{
+				Name:      toolName,
+				Arguments: argsStr,
+			},
+		})
+	}
+
+	if len(calls) == 0 {
+		return nil, "", false
+	}
+	return calls, prefix, true
+}
+
+func validGLMToolName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, c := range name {
+		if i == 0 && !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+			return false
+		}
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeGLMToolArguments(body string) string {
+	if body == "" {
+		return "{}"
+	}
+	if json.Valid([]byte(body)) {
+		var object map[string]interface{}
+		if json.Unmarshal([]byte(body), &object) == nil {
+			return body
+		}
+	}
+
+	args := make(map[string]interface{})
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		colon := strings.Index(line, ":")
+		if colon <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:colon])
+		val := strings.TrimSpace(line[colon+1:])
+		if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') ||
+			(val[0] == '\'' && val[len(val)-1] == '\'')) {
+			val = val[1 : len(val)-1]
+		}
+		args[key] = val
+	}
+	if len(args) == 0 {
+		return "{}"
+	}
+	encoded, err := json.Marshal(args)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
 
 // parseToolCallsPayload validates and normalises a `{"tool_calls": [...]}`
@@ -402,12 +517,9 @@ func (s *streamClassifier) flush() string {
 }
 
 // earliestTriggerIndex returns the position of the earliest possible start
-// of a tool_calls payload (a fenced ```json marker, a bare '{', or a suffix
-// that could still grow into a fenced marker once more text arrives), or -1
-// if none appears. This is intentionally cheap/approximate — it only needs
-// to find a safe cut point before which text can never be part of a
-// candidate; parseToolCallOutput (unchanged) remains the sole authority on
-// whether what follows actually IS a tool_calls payload.
+// of a tool_calls payload (a fenced ```json marker, a bare '{', a <tool_call>
+// tag, or a suffix that could still grow into one of those), or -1 if none
+// appears.
 func earliestTriggerIndex(s string) int {
 	idx := -1
 	if fenced := strings.Index(s, "```json"); fenced >= 0 {
@@ -415,6 +527,9 @@ func earliestTriggerIndex(s string) int {
 	}
 	if brace := strings.IndexByte(s, '{'); brace >= 0 && (idx < 0 || brace < idx) {
 		idx = brace
+	}
+	if glmt := glmTriggerIndex(s); glmt >= 0 && (idx < 0 || glmt < idx) {
+		idx = glmt
 	}
 	// A fence marker can be split across two fragments (e.g. one fragment
 	// ends in "``" and the next starts with "`json"). If the tail of s is a
@@ -426,6 +541,26 @@ func earliestTriggerIndex(s string) int {
 		}
 	}
 	return idx
+}
+
+// glmTriggerIndex returns the index of a complete or partial <tool_call>
+// marker so split streaming fragments are held until classification is possible.
+func glmTriggerIndex(s string) int {
+	const marker = "<tool_call>"
+	lower := strings.ToLower(s)
+	if idx := strings.Index(lower, marker); idx >= 0 {
+		return idx
+	}
+	max := len(marker) - 1
+	if len(lower) < max {
+		max = len(lower)
+	}
+	for length := max; length > 0; length-- {
+		if strings.HasSuffix(lower, marker[:length]) {
+			return len(s) - length
+		}
+	}
+	return -1
 }
 
 // partialFenceSuffixLen returns the length of the longest suffix of s that is

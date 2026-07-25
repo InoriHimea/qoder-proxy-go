@@ -789,6 +789,36 @@ func parseCNSSELine(data string) (chunk []byte, done bool, errMsg string, errSta
 	return []byte(data), false, "", 0
 }
 
+// buildDirectChatMessage constructs the OpenAI chat completion message map
+// from raw content + thinking, parsing any GLM-style tool calls into the
+// standard `tool_calls` array.
+func buildDirectChatMessage(content, thinking string) map[string]interface{} {
+	msgMap := map[string]interface{}{"role": "assistant"}
+	if thinking != "" {
+		msgMap["reasoning_content"] = thinking
+	}
+
+	parsed := parseToolCallOutput(content)
+	if parsed != nil && parsed.Type == "tool_calls" {
+		var tcs []map[string]interface{}
+		for _, tc := range parsed.ToolCalls {
+			tcs = append(tcs, map[string]interface{}{
+				"id":   tc.ID,
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			})
+		}
+		msgMap["content"] = parsed.PrefixText
+		msgMap["tool_calls"] = tcs
+	} else {
+		msgMap["content"] = content
+	}
+	return msgMap
+}
+
 func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
 
@@ -857,20 +887,10 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 
 	finalContent := contentBuilder.String()
 	finalThinking := thinkingBuilder.String()
-	if finalContent == "" {
-		dump := strings.Join(rawLines, " | ")
-		if len(dump) > 2000 {
-			dump = dump[:2000]
-		}
-		AddSystemLog(fmt.Sprintf("CN gateway produced empty content, raw SSE lines: %s", dump), "warn", "direct")
-		AddSystemLog("Falling back to CLI mode due to empty CN gateway response", "warn", "direct")
-		return true
-	}
+
+	msgMap := buildDirectChatMessage(finalContent, finalThinking)
+
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
-	msgMap := map[string]interface{}{"role": "assistant", "content": finalContent}
-	if finalThinking != "" {
-		msgMap["reasoning_content"] = finalThinking
-	}
 	resp := map[string]interface{}{
 		"id":      id,
 		"object":  "chat.completion",
@@ -891,7 +911,13 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	ctx.SetUserValue("response_body", resp)
 
 	sys, prompt := extractSystemAndPrompt(req.Messages)
-	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalThinking+finalContent), false, time.Since(started).Milliseconds())
+	outputContent := finalContent
+	if tc, ok := msgMap["tool_calls"].([]map[string]interface{}); ok && len(tc) > 0 {
+		if prefix, ok := msgMap["content"].(string); ok {
+			outputContent = prefix
+		}
+	}
+	um.Record(req.Model, countTokens(sys+"\n"+prompt), countTokens(finalThinking+outputContent), false, time.Since(started).Milliseconds())
 	ctx.SetUserValue("log_metrics", &LogMetrics{
 		InputTokens:    countTokens(sys + "\n" + prompt),
 		OutputTokens:   countTokens(finalThinking + finalContent),

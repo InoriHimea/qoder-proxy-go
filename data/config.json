@@ -1,8 +1,15 @@
 {
-  "backend": "cn",
-  "token": "dt-rgy2Lqvo0MgBnktkd4mI2GfH",
-  "use_direct_api": false,
-  "proxy_url": "",
+  "accounts": [
+    {
+      "id": "default",
+      "name": "Default",
+      "backend": "cn",
+      "token": "dt-rgy2Lqvo0MgBnktkd4mI2GfH",
+      "use_direct_api": false,
+      "proxy_url": ""
+    }
+  ],
+  "active_account_id": "default",
   "models": [
     {
       "id": "auto",

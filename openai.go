@@ -196,6 +196,15 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		DisableTools:    true,
 	}
 
+	promptTokens := countTokens(fullSystem + "\n" + prompt)
+	if limit := modelContextWindow(cfg.Models, req.Model); limit > 0 && promptTokens > limit {
+		AddSystemLog(fmt.Sprintf("Context length %d exceeds model %s limit %d, rejecting", promptTokens, req.Model, limit), "warn", "context")
+		ctx.SetStatusCode(http.StatusRequestEntityTooLarge)
+		ctx.SetBodyString(fmt.Sprintf("Request context (%d tokens) exceeds model %s context window (%d tokens). Please reduce conversation length or use a model with a larger context window.", promptTokens, req.Model, limit))
+		um.Record(req.Model, promptTokens, 0, true, time.Since(started).Milliseconds())
+		return
+	}
+
 	stdout, err := spawnQoderCli(ctx, prompt, opts, cm)
 	if err != nil {
 		ctx.Error(RedactSensitiveInfo(fmt.Sprintf("Spawn failed: %v", err)), http.StatusInternalServerError)
@@ -483,6 +492,15 @@ func handleChatCompletions(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Usag
 		DisableTools:    true,
 	}
 
+	promptTokens := countTokens(opts.SystemPrompt + "\n" + prompt)
+	if limit := modelContextWindow(cfg.Models, req.Model); limit > 0 && promptTokens > limit {
+		AddSystemLog(fmt.Sprintf("Context length %d exceeds model %s limit %d, rejecting", promptTokens, req.Model, limit), "warn", "context")
+		ctx.SetStatusCode(http.StatusRequestEntityTooLarge)
+		ctx.SetBodyString(fmt.Sprintf("Request context (%d tokens) exceeds model %s context window (%d tokens). Please reduce conversation length or use a model with a larger context window.", promptTokens, req.Model, limit))
+		um.Record(req.Model, promptTokens, 0, true, time.Since(started).Milliseconds())
+		return
+	}
+
 	stdout, err := spawnQoderCli(ctx, prompt, opts, cm)
 	if err != nil {
 		ctx.Error(RedactSensitiveInfo(fmt.Sprintf("Spawn failed: %v", err)), http.StatusInternalServerError)
@@ -601,6 +619,16 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 		MaxTokens:       req.MaxTokens,
 		SystemPrompt:    mergeSystemPrompt(sys, toolPrompt),
 		DisableTools:    true,
+	}
+
+	promptTokens := countTokens(opts.SystemPrompt + "\n" + prompt)
+	cfg := cm.Get()
+	if limit := modelContextWindow(cfg.Models, req.Model); limit > 0 && promptTokens > limit {
+		AddSystemLog(fmt.Sprintf("Context length %d exceeds model %s limit %d, rejecting", promptTokens, req.Model, limit), "warn", "context")
+		ctx.SetStatusCode(http.StatusRequestEntityTooLarge)
+		ctx.SetBodyString(fmt.Sprintf("Request context (%d tokens) exceeds model %s context window (%d tokens). Please reduce conversation length or use a model with a larger context window.", promptTokens, req.Model, limit))
+		um.Record(req.Model, promptTokens, 0, true, time.Since(started).Milliseconds())
+		return
 	}
 
 	stdout, err := spawnQoderCli(ctx, prompt, opts, cm)

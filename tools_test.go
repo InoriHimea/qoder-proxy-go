@@ -181,6 +181,110 @@ func TestStreamClassifierMaxHeldBytesFallbackAcrossFragments(t *testing.T) {
 	}
 }
 
+func TestParseGLMToolCallWrapper(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		wantName   string
+		wantArgs   string
+		wantPrefix string
+	}{
+		{
+			name:       "bash key value arguments",
+			output:     "I'll inspect it.\n<tool_call>bash\ncommand: ls\n</tool_call>",
+			wantName:   "bash",
+			wantArgs:   `{"command":"ls"}`,
+			wantPrefix: "I'll inspect it.",
+		},
+		{
+			name:     "Write JSON arguments",
+			output:   "<tool_call>Write\n{\"file_path\":\"note.txt\",\"content\":\"hello\"}\n</tool_call>",
+			wantName: "Write",
+			wantArgs: `{"file_path":"note.txt","content":"hello"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed := parseToolCallOutput(tt.output)
+			if parsed.Type != "tool_calls" || len(parsed.ToolCalls) != 1 {
+				t.Fatalf("parsed = %+v, want one tool call", parsed)
+			}
+			call := parsed.ToolCalls[0]
+			if call.Function.Name != tt.wantName {
+				t.Errorf("tool name = %q, want %q", call.Function.Name, tt.wantName)
+			}
+			if call.Function.Arguments != tt.wantArgs {
+				t.Errorf("arguments = %q, want %q", call.Function.Arguments, tt.wantArgs)
+			}
+			if parsed.PrefixText != tt.wantPrefix {
+				t.Errorf("prefix = %q, want %q", parsed.PrefixText, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestStreamClassifierGLMToolCallWrapper(t *testing.T) {
+	c := &streamClassifier{}
+	fragments := []string{"I'll inspect it.\n<tool_", "call>Write\n{\"file_path\":", "\"note.txt\",\"content\":\"hello\"}\n</tool_call>"}
+	var forwarded strings.Builder
+	var resolved *ParsedToolOutput
+	for _, fragment := range fragments {
+		plain, result := c.feed(fragment)
+		forwarded.WriteString(plain)
+		if result != nil {
+			resolved = result
+		}
+	}
+	if resolved == nil || len(resolved.ToolCalls) != 1 {
+		t.Fatalf("resolved = %+v, want one tool call", resolved)
+	}
+	if resolved.ToolCalls[0].Function.Name != "Write" {
+		t.Errorf("tool name = %q, want Write", resolved.ToolCalls[0].Function.Name)
+	}
+	if got := strings.TrimSpace(forwarded.String()); got != "I'll inspect it." {
+		t.Errorf("forwarded = %q", got)
+	}
+}
+
+func TestBuildDirectChatMessageKeepsArgumentsString(t *testing.T) {
+	message := buildDirectChatMessage("<tool_call>Write\n{\"file_path\":\"note.txt\",\"content\":\"hello\"}\n</tool_call>", "")
+	calls, ok := message["tool_calls"].([]map[string]interface{})
+	if !ok || len(calls) != 1 {
+		t.Fatalf("tool_calls = %#v", message["tool_calls"])
+	}
+	function, ok := calls[0]["function"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("function = %#v", calls[0]["function"])
+	}
+	arguments, ok := function["arguments"].(string)
+	if !ok {
+		t.Fatalf("arguments type = %T, want string", function["arguments"])
+	}
+	if arguments != `{"file_path":"note.txt","content":"hello"}` {
+		t.Fatalf("arguments = %q", arguments)
+	}
+}
+
+func TestBuildAnthropicResponseFromGLMWriteCall(t *testing.T) {
+	content := "<tool_call>Write\n{\"file_path\":\"note.txt\",\"content\":\"hello\"}\n</tool_call>"
+	response := buildAnthropicResponse("msg_test", "glm-5.2", content, parseToolCallOutput(content), 10, "")
+	if response.StopReason != "tool_use" || len(response.Content) != 1 {
+		t.Fatalf("response = %+v", response)
+	}
+	block := response.Content[0]
+	if block.Type != "tool_use" || block.Name != "Write" {
+		t.Fatalf("tool block = %+v", block)
+	}
+	input, ok := block.Input.(map[string]interface{})
+	if !ok {
+		t.Fatalf("input type = %T", block.Input)
+	}
+	if input["file_path"] != "note.txt" || input["content"] != "hello" {
+		t.Fatalf("input = %#v", input)
+	}
+}
+
 func TestNormalizeAnthropicToolUseMatchesExpectedOutputFormat(t *testing.T) {
 	content := []interface{}{
 		map[string]interface{}{
