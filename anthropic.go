@@ -59,21 +59,35 @@ type AnthropicUsage struct {
 
 // Anthropic SSE Event Structures
 type AnthropicSSEEvent struct {
-	Type         string               `json:"type"`
-	Message      *AnthropicResponse   `json:"message,omitempty"`
-	Index        int                  `json:"index,omitempty"`
+	Type    string             `json:"type"`
+	Message *AnthropicResponse `json:"message,omitempty"`
+	// Index is a pointer so that content_block_* events always emit it (the
+	// Anthropic SSE spec requires it, and a plain int with omitempty would drop
+	// it for the first block at index 0), while message_* events, which have no
+	// index in the spec, omit it entirely.
+	Index        *int                 `json:"index,omitempty"`
 	ContentBlock *AnthropicContent    `json:"content_block,omitempty"`
 	Delta        *AnthropicEventDelta `json:"delta,omitempty"`
 }
 
+// idxPtr returns a pointer suitable for AnthropicSSEEvent.Index.
+func idxPtr(i int) *int { return &i }
+
+// AnthropicDeltaUsage is the cumulative-usage payload on message_delta. The
+// spec only carries output_tokens there, so this stays separate from
+// AnthropicUsage, whose input_tokens must serialize on message_start.
+type AnthropicDeltaUsage struct {
+	OutputTokens int `json:"output_tokens"`
+}
+
 type AnthropicEventDelta struct {
-	Type         string          `json:"type"` // "text_delta" | "thinking_delta" | "input_json_delta"
-	Text         string          `json:"text,omitempty"`
-	Thinking     string          `json:"thinking,omitempty"`
-	PartialJSON  string          `json:"partial_json,omitempty"`
-	StopReason   string          `json:"stop_reason,omitempty"`
-	StopSequence string          `json:"stop_sequence,omitempty"`
-	Usage        *AnthropicUsage `json:"usage,omitempty"`
+	Type         string               `json:"type"` // "text_delta" | "thinking_delta" | "input_json_delta"
+	Text         string               `json:"text,omitempty"`
+	Thinking     string               `json:"thinking,omitempty"`
+	PartialJSON  string               `json:"partial_json,omitempty"`
+	StopReason   string               `json:"stop_reason,omitempty"`
+	StopSequence string               `json:"stop_sequence,omitempty"`
+	Usage        *AnthropicDeltaUsage `json:"usage,omitempty"`
 }
 
 // Conversion Helpers
@@ -284,11 +298,12 @@ func buildAnthropicStartEvent(id string, model string, inputTokens int) Anthropi
 	return AnthropicSSEEvent{
 		Type: "message_start",
 		Message: &AnthropicResponse{
-			ID:    id,
-			Type:  "message",
-			Role:  "assistant",
-			Model: model,
-			Usage: AnthropicUsage{InputTokens: inputTokens, OutputTokens: 0},
+			ID:      id,
+			Type:    "message",
+			Role:    "assistant",
+			Model:   model,
+			Content: []AnthropicContent{},
+			Usage:   AnthropicUsage{InputTokens: inputTokens, OutputTokens: 0},
 		},
 	}
 }

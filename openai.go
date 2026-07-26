@@ -292,7 +292,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 
 		closeThinkingIfOpen := func() {
 			if thinkingOpen {
-				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: thinkingIndex})
+				writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: idxPtr(thinkingIndex)})
 				thinkingOpen = false
 			}
 		}
@@ -300,7 +300,7 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			if !textOpen {
 				textIndex = nextIndex
 				nextIndex++
-				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: textIndex, ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
+				writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: idxPtr(textIndex), ContentBlock: &AnthropicContent{Type: "text", Text: ""}})
 				textOpen = true
 			}
 		}
@@ -333,10 +333,10 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 				if !thinkingOpen {
 					thinkingIndex = nextIndex
 					nextIndex++
-					writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: thinkingIndex, ContentBlock: &AnthropicContent{Type: "thinking", Thinking: ""}})
+					writeEvent("content_block_start", AnthropicSSEEvent{Type: "content_block_start", Index: idxPtr(thinkingIndex), ContentBlock: &AnthropicContent{Type: "thinking", Thinking: ""}})
 					thinkingOpen = true
 				}
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: thinkingIndex, Delta: &AnthropicEventDelta{Type: "thinking_delta", Thinking: thinking}})
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: idxPtr(thinkingIndex), Delta: &AnthropicEventDelta{Type: "thinking_delta", Thinking: thinking}})
 			}
 
 			content := extractContentText(msg["content"])
@@ -349,13 +349,13 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			if plainText != "" {
 				closeThinkingIfOpen()
 				openTextIfNeeded()
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: textIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: plainText}})
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: idxPtr(textIndex), Delta: &AnthropicEventDelta{Type: "text_delta", Text: plainText}})
 			}
 
 			if resolved != nil {
 				closeThinkingIfOpen()
 				if textOpen {
-					writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: textIndex})
+					writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: idxPtr(textIndex)})
 					textOpen = false
 				}
 				for _, tc := range resolved.ToolCalls {
@@ -367,15 +367,15 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 					}
 					writeEvent("content_block_start", AnthropicSSEEvent{
 						Type:         "content_block_start",
-						Index:        blockIndex,
+						Index:        idxPtr(blockIndex),
 						ContentBlock: &AnthropicContent{Type: "tool_use", ID: generateCallId("toolu_"), Name: tc.Function.Name, Input: input},
 					})
 					writeEvent("content_block_delta", AnthropicSSEEvent{
 						Type:  "content_block_delta",
-						Index: blockIndex,
+						Index: idxPtr(blockIndex),
 						Delta: &AnthropicEventDelta{Type: "input_json_delta", PartialJSON: tc.Function.Arguments},
 					})
-					writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: blockIndex})
+					writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: idxPtr(blockIndex)})
 				}
 				resolvedTools = resolved
 				// Do not break — keep draining the scanner to EOF below.
@@ -392,17 +392,17 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 			if remaining := classifier.flush(); remaining != "" {
 				closeThinkingIfOpen()
 				openTextIfNeeded()
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: textIndex, Delta: &AnthropicEventDelta{Type: "text_delta", Text: remaining}})
+				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: idxPtr(textIndex), Delta: &AnthropicEventDelta{Type: "text_delta", Text: remaining}})
 			}
 			// Guarantee at least one non-thinking content block for protocol
 			// compatibility, even on a fully empty reply.
 			closeThinkingIfOpen()
 			openTextIfNeeded()
-			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: textIndex})
-			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn"}})
+			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: idxPtr(textIndex)})
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "end_turn", Usage: &AnthropicDeltaUsage{OutputTokens: countTokens(thinkingStr + fullContent.String())}}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		} else {
-			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use"}})
+			writeEvent("message_delta", AnthropicSSEEvent{Type: "message_delta", Delta: &AnthropicEventDelta{Type: "message_delta", StopReason: "tool_use", Usage: &AnthropicDeltaUsage{OutputTokens: countTokens(thinkingStr + fullContent.String())}}})
 			writeEvent("message_stop", AnthropicSSEEvent{Type: "message_stop"})
 		}
 
