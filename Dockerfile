@@ -16,8 +16,14 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install qodercli and qoderclicn globally (needed by the Go proxy)
-RUN npm install -g @qoder-ai/qodercli @qodercn-ai/qoderclicn
+# Pin both CLIs so image rebuilds remain reproducible across npm releases.
+ARG QODERCLI_VERSION=1.0.37
+ARG QODERCLICN_VERSION=1.0.37
+RUN npm install -g \
+    @qoder-ai/qodercli@${QODERCLI_VERSION} \
+    @qodercn-ai/qoderclicn@${QODERCLICN_VERSION} \
+    && test "$(qodercli --version)" = "${QODERCLI_VERSION}" \
+    && test "$(qoderclicn --version)" = "${QODERCLICN_VERSION}"
 
 # Disable auto-updates
 RUN mkdir -p /root/.qoder && echo '{"autoUpdates":false}' > /root/.qoder.json

@@ -105,14 +105,15 @@ try {
     }
 
     // The credential class and path function live inside an esbuild lazy-init
-    // wrapper (`NAME=M(()=>{...})`) that populates module-level state (base
+    // wrapper (`NAME=HELPER(()=>{...})`) that populates module-level state (base
     // dirs, endpoint config, etc). Importing the trimmed bundle skips whatever
     // normally triggers that wrapper, so we detect its name and invoke it
-    // ourselves before touching credClass/pathFn.
+    // ourselves before touching credClass/pathFn. The minified helper name
+    // differs across CLI releases (M in 1.0.37, p in 1.1.5), so match it too.
     let lazyInitName = null;
     if (saveIdx !== -1) {
         const before = code.substring(Math.max(0, saveIdx - 3000), saveIdx);
-        const wraps = [...before.matchAll(/([a-zA-Z0-9_$]+)=M\(\(\)=>\{/g)];
+        const wraps = [...before.matchAll(/([a-zA-Z0-9_$]+)=([a-zA-Z0-9_$]{1,3})\(\(\)=>\{/g)];
         if (wraps.length > 0) lazyInitName = wraps[wraps.length - 1][1];
     }
     if (!lazyInitName) {

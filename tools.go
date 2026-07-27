@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -360,6 +361,24 @@ func normalizeGLMToolArguments(body string) string {
 	return string(encoded)
 }
 
+var malformedEditCallPattern = regexp.MustCompile(`("edits"\s*:\s*\[\s*\{\s*"newText"\s*:\s*"(?:\\.|[^"\\])*")\s*\}\s*,\s*("oldText"\s*:\s*"(?:\\.|[^"\\])*")\s*\}\s*,\s*("path"\s*:)`)
+
+func repairMalformedEditToolCall(payload string) (string, bool) {
+	if len(malformedEditCallPattern.FindAllStringIndex(payload, 2)) != 1 {
+		return "", false
+	}
+	repaired := malformedEditCallPattern.ReplaceAllString(payload, `${1},${2}}],${3}`)
+	var probe struct {
+		ToolCalls []struct {
+			Name string `json:"name"`
+		} `json:"tool_calls"`
+	}
+	if json.Unmarshal([]byte(repaired), &probe) != nil || len(probe.ToolCalls) != 1 || probe.ToolCalls[0].Name != "edit" {
+		return "", false
+	}
+	return repaired, true
+}
+
 // parseToolCallsPayload validates and normalises a `{"tool_calls": [...]}`
 // payload into ToolCall structs.
 func parseToolCallsPayload(jsonStr string) ([]ToolCall, bool) {
@@ -367,13 +386,18 @@ func parseToolCallsPayload(jsonStr string) ([]ToolCall, bool) {
 		ToolCalls []map[string]interface{} `json:"tool_calls"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
-		// Last-ditch: trim to first { … last } and retry.
-		first := strings.Index(jsonStr, "{")
-		last := strings.LastIndex(jsonStr, "}")
-		if first < 0 || last <= first {
-			return nil, false
+		if repaired, ok := repairMalformedEditToolCall(jsonStr); ok {
+			jsonStr = repaired
+		} else {
+			// Last-ditch: trim to first { … last } and retry.
+			first := strings.Index(jsonStr, "{")
+			last := strings.LastIndex(jsonStr, "}")
+			if first < 0 || last <= first {
+				return nil, false
+			}
+			jsonStr = jsonStr[first : last+1]
 		}
-		if err := json.Unmarshal([]byte(jsonStr[first:last+1]), &wrapper); err != nil {
+		if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
 			return nil, false
 		}
 	}

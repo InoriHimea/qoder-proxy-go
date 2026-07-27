@@ -126,8 +126,7 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 		}
 	}
 
-	// Prepare arguments. Note: we must include `--` so qodercli knows the prompt comes from stdin.
-	args := []string{"-p", "-", "-f", "stream-json", "--dangerously-skip-permissions", "--permission-mode", "bypass_permissions"}
+	args := []string{"-p", "-", "-o", "stream-json", "--dangerously-skip-permissions", "--permission-mode", "bypass_permissions"}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}

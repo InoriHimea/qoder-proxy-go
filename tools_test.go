@@ -247,6 +247,61 @@ func TestStreamClassifierGLMToolCallWrapper(t *testing.T) {
 	}
 }
 
+func TestParseMalformedEditToolCall(t *testing.T) {
+	content := "```json\n" +
+		`{"tool_calls":[{"arguments":{"edits":[{"newText":"{\n  \"title\": \"OmniAgent\",\n  \"width\": 1200"},"oldText":"{\n  \"title\": \"OmniAgent\""},"path":"F:/project/src-tauri/tauri.conf.json"},"name":"edit"}]}` +
+		"\n```"
+
+	parsed := parseToolCallOutput(content)
+	if parsed.Type != "tool_calls" || len(parsed.ToolCalls) != 1 {
+		t.Fatalf("parsed = %+v, want one tool call", parsed)
+	}
+	call := parsed.ToolCalls[0]
+	if call.Function.Name != "edit" {
+		t.Fatalf("tool name = %q, want edit", call.Function.Name)
+	}
+	if call.Function.Arguments != `{"edits":[{"newText":"{\n  \"title\": \"OmniAgent\",\n  \"width\": 1200","oldText":"{\n  \"title\": \"OmniAgent\""}],"path":"F:/project/src-tauri/tauri.conf.json"}` {
+		t.Fatalf("arguments = %q", call.Function.Arguments)
+	}
+}
+
+func TestStreamClassifierRepairsMalformedEditToolCall(t *testing.T) {
+	fragments := []string{
+		"```json\n",
+		`{"tool_calls":[{"arguments":{"edits":[{"newText":"new"},`,
+		`"oldText":"old"},"path":"F:/project/file.json"},"name":"edit"}]}`,
+		"\n```",
+	}
+	classifier := &streamClassifier{}
+	var forwarded strings.Builder
+	var resolved *ParsedToolOutput
+	for _, fragment := range fragments {
+		plain, result := classifier.feed(fragment)
+		forwarded.WriteString(plain)
+		if result != nil {
+			resolved = result
+		}
+	}
+	if resolved == nil || len(resolved.ToolCalls) != 1 {
+		t.Fatalf("resolved = %+v, want one tool call; forwarded=%q", resolved, forwarded.String())
+	}
+	if resolved.ToolCalls[0].Function.Name != "edit" {
+		t.Fatalf("tool name = %q, want edit", resolved.ToolCalls[0].Function.Name)
+	}
+	response := buildAnthropicResponse("msg_test", "glm-5.2", strings.Join(fragments, ""), resolved, 10, "")
+	if response.StopReason != "tool_use" || len(response.Content) != 1 || response.Content[0].Type != "tool_use" {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestParseMalformedNonEditToolCallStaysText(t *testing.T) {
+	content := `{"tool_calls":[{"arguments":{"items":[{"value":"new"},"oldValue":"old"}},"name":"other"}]}`
+	parsed := parseToolCallOutput(content)
+	if parsed.Type != "text" {
+		t.Fatalf("parsed = %+v, want text", parsed)
+	}
+}
+
 func TestBuildDirectChatMessageKeepsArgumentsString(t *testing.T) {
 	message := buildDirectChatMessage("<tool_call>Write\n{\"file_path\":\"note.txt\",\"content\":\"hello\"}\n</tool_call>", "")
 	calls, ok := message["tool_calls"].([]map[string]interface{})
