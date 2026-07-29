@@ -389,13 +389,17 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 		thinkingStr := fullThinking.String()
 
 		if resolvedTools == nil {
+			if parsed := parseToolCallOutput(fullContent.String()); parsed.Type == "tool_calls" {
+				resolvedTools = parsed
+			}
+		}
+
+		if resolvedTools == nil {
 			if remaining := classifier.flush(); remaining != "" {
 				closeThinkingIfOpen()
 				openTextIfNeeded()
 				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: idxPtr(textIndex), Delta: &AnthropicEventDelta{Type: "text_delta", Text: remaining}})
 			}
-			// Guarantee at least one non-thinking content block for protocol
-			// compatibility, even on a fully empty reply.
 			closeThinkingIfOpen()
 			openTextIfNeeded()
 			writeEvent("content_block_stop", AnthropicSSEEvent{Type: "content_block_stop", Index: idxPtr(textIndex)})

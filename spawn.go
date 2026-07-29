@@ -231,10 +231,10 @@ func spawnQoderCli(ctx context.Context, prompt string, opts SpawnOptions, cm *Co
 		}
 	}()
 
-	// Write prompt to stdin asynchronously
+	// Write prompt to stdin and close immediately so the CLI sees EOF.
 	go func() {
-		defer stdin.Close()
 		_, err := io.WriteString(stdin, prompt+"\n")
+		stdin.Close()
 		if err != nil {
 			AddSystemLog(fmt.Sprintf("Failed to write to CLI stdin: %v", err), "error", "spawn")
 		}

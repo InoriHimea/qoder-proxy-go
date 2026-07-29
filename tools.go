@@ -361,13 +361,29 @@ func normalizeGLMToolArguments(body string) string {
 	return string(encoded)
 }
 
-var malformedEditCallPattern = regexp.MustCompile(`("edits"\s*:\s*\[\s*\{\s*"newText"\s*:\s*"(?:\\.|[^"\\])*")\s*\}\s*,\s*("oldText"\s*:\s*"(?:\\.|[^"\\])*")\s*\}\s*,\s*("path"\s*:)`)
+var malformedEditCallPattern = regexp.MustCompile(`(\})\s*,\s*("newText"\s*:\s*"(?:\\.|[^"\\])*")\s*,\s*("oldText"\s*:\s*"(?:\\.|[^"\\])*")\s*\}\s*,\s*("path"\s*:)`)
 
 func repairMalformedEditToolCall(payload string) (string, bool) {
-	if len(malformedEditCallPattern.FindAllStringIndex(payload, 2)) != 1 {
-		return "", false
+	repaired := payload
+
+	// Fix 1: Extract misplaced `"name":"edit"` from inside arguments to the
+	// tool-call level. Model emits `},"name":"edit"}]}}` inside the edits
+	// array instead of closing the array first and placing name at the
+	// tool-call level: `}]},"name":"edit"}]}`.
+	if strings.Contains(repaired, `},"name":"edit"}]}}`) {
+		repaired = strings.Replace(repaired, `},"name":"edit"}]}}`, `}]},"name":"edit"}]}`, 1)
 	}
-	repaired := malformedEditCallPattern.ReplaceAllString(payload, `${1},${2}}],${3}`)
+
+	// Fix 2: Missing `{` before a second edit object's first field.
+	if strings.Contains(repaired, `},"newText":`) {
+		repaired = strings.Replace(repaired, `},"newText":`, `},{"newText":`, 1)
+	}
+
+	// Fix 3: Close the edits array if `,"path"` is still preceded by a bare `}`.
+	if strings.Contains(repaired, `},"path"`) {
+		repaired = strings.Replace(repaired, `},"path"`, `]},"path"`, 1)
+	}
+
 	var probe struct {
 		ToolCalls []struct {
 			Name string `json:"name"`
@@ -490,6 +506,13 @@ func (s *streamClassifier) feed(fragment string) (plainText string, resolved *Pa
 
 	idx := earliestTriggerIndex(candidate)
 	if idx < 0 {
+		// No new trigger marker, but the accumulated buffer (held + this
+		// fragment) might itself be a complete tool_calls payload — e.g.
+		// held contained the full fenced block and fragment is just trailing
+		// text. Try parsing before flushing as plain text.
+		if parsed := parseToolCallOutput(candidate); parsed.Type == "tool_calls" {
+			return parsed.PrefixText, parsed
+		}
 		return candidate, nil
 	}
 	safe, tail := candidate[:idx], candidate[idx:]

@@ -248,8 +248,13 @@ func TestStreamClassifierGLMToolCallWrapper(t *testing.T) {
 }
 
 func TestParseMalformedEditToolCall(t *testing.T) {
+	// Model malformed output: `"name":"edit"` is inside the edits array
+	// instead of at the tool-call level, and the array is missing `]` before it.
+	// Also the edits object is missing `}` at the end (extra `}` instead of `]`).
+	// Correct JSON: {"edits":[...],"name":"edit"}
+	// Malformed:    {"edits":[...},"name":"edit"}]}}
 	content := "```json\n" +
-		`{"tool_calls":[{"arguments":{"edits":[{"newText":"{\n  \"title\": \"OmniAgent\",\n  \"width\": 1200"},"oldText":"{\n  \"title\": \"OmniAgent\""},"path":"F:/project/src-tauri/tauri.conf.json"},"name":"edit"}]}` +
+		`{"tool_calls":[{"arguments":{"edits":[{"newText":"new 1","oldText":"old 1","path":"F:/a.json"},"name":"edit"}]}}` +
 		"\n```"
 
 	parsed := parseToolCallOutput(content)
@@ -260,16 +265,17 @@ func TestParseMalformedEditToolCall(t *testing.T) {
 	if call.Function.Name != "edit" {
 		t.Fatalf("tool name = %q, want edit", call.Function.Name)
 	}
-	if call.Function.Arguments != `{"edits":[{"newText":"{\n  \"title\": \"OmniAgent\",\n  \"width\": 1200","oldText":"{\n  \"title\": \"OmniAgent\""}],"path":"F:/project/src-tauri/tauri.conf.json"}` {
-		t.Fatalf("arguments = %q", call.Function.Arguments)
+	wantArgs := `{"edits":[{"newText":"new 1","oldText":"old 1","path":"F:/a.json"}]}`
+	if call.Function.Arguments != wantArgs {
+		t.Fatalf("arguments = %q, want %q", call.Function.Arguments, wantArgs)
 	}
 }
 
 func TestStreamClassifierRepairsMalformedEditToolCall(t *testing.T) {
 	fragments := []string{
 		"```json\n",
-		`{"tool_calls":[{"arguments":{"edits":[{"newText":"new"},`,
-		`"oldText":"old"},"path":"F:/project/file.json"},"name":"edit"}]}`,
+		`{"tool_calls":[{"arguments":{"edits":[{"newText":"new1","oldText":"old1","path":"F:/a.json"},"`,
+		`name":"edit"}]}}`,
 		"\n```",
 	}
 	classifier := &streamClassifier{}
