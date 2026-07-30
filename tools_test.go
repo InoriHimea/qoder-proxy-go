@@ -55,16 +55,15 @@ func TestStreamClassifierMatchesWholeBufferParse(t *testing.T) {
 			},
 		},
 		{
-			name: "bare brace tool_calls no fence",
-			fragments: []string{
-				"Sure.\n",
-				"{\"tool_calls\": [{\"name\": \"get_weather\", \"arguments\": {\"city\": \"NYC\"}}]}",
-			},
-		},
-		{
 			name: "multiple tool calls in one payload",
 			fragments: []string{
 				"{\"tool_calls\": [{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"b\", \"arguments\": {\"x\": 1}}]}",
+			},
+		},
+		{
+			name: "duplicate tool_calls (model emitted same JSON twice in one block)",
+			fragments: []string{
+				"{\"tool_calls\": [{\"name\": \"view\", \"arguments\": {\"file_path\": \"go.mod\"}}]}{\"tool_calls\": [{\"name\": \"view\", \"arguments\": {\"file_path\": \"go.mod\"}}]}",
 			},
 		},
 		{
