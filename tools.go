@@ -246,10 +246,66 @@ func extractToolCallJSON(text string) (jsonStr, prefixText string) {
 			continue
 		}
 		if json.Valid([]byte(candidate)) {
-			return candidate, strings.TrimSpace(text[:start])
+			after := text[end+1:]
+			after = skipDuplicateToolCalls(after)
+			return candidate, strings.TrimSpace(text[:start]) + after
 		}
 	}
 	return "", ""
+}
+
+// skipDuplicateToolCalls strips a second consecutive tool_calls payload that
+// the model emitted immediately after the first one (same JSON repeated with
+// no separating prose). The repeated block is silently discarded rather than
+// forwarded as plain text.
+func skipDuplicateToolCalls(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if !strings.HasPrefix(s, "{") {
+		return s
+	}
+	depth := 0
+	inString := false
+	escapeNext := false
+	end := -1
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escapeNext {
+			escapeNext = false
+			continue
+		}
+		if ch == '\\' && inString {
+			escapeNext = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		if ch == '{' {
+			depth++
+		}
+		if ch == '}' {
+			depth--
+			if depth == 0 {
+				end = i
+				break
+			}
+		}
+	}
+	if end < 0 {
+		return s
+	}
+	dup := s[:end+1]
+	if !strings.Contains(dup, `"tool_calls"`) || !json.Valid([]byte(dup)) {
+		return s
+	}
+	return skipDuplicateToolCalls(s[end+1:])
 }
 
 // parseGLMToolCalls detects GLM-style <tool_call> wrappers and converts them
