@@ -55,12 +55,11 @@ func buildToolSystemPrompt(tools []normalizedTool) string {
 	if len(tools) == 0 {
 		return ""
 	}
-	return "[Tool Protocol] 以下工具可供调用：\n\n" +
-		mustJSON(tools) +
-		"\n\n如需调用工具，请仅输出以下格式的 JSON 代码块：\n\n```json\n" +
-		`{"tool_calls": [{"name": "工具名称", "arguments": {参数对象}}]}` + "\n```\n\n" +
-		"如不需要调用工具，直接以正常文本回复，不要输出任何 JSON 代码块。\n" +
-		"不要在同一个回复中既输出普通文本又输出工具调用 JSON。"
+	return "你必须通过工具获取信息或执行操作。你自己无法直接回答，也不能输出 shell 命令、代码片段、搜索步骤等描述性文字——这些都算纯文本，严格禁止。\n\n" +
+		"可用工具：\n\n" + mustJSON(tools) + "\n\n" +
+		"调用方式：仅输出一个 JSON 代码块，不要任何前缀、说明或解释：\n\n```json\n" +
+		`{"tool_calls": [{"name": "工具名", "arguments": {...}}]}` + "\n```\n\n" +
+		"无法调用工具时（工具列表为空），直接回复纯文本答案。"
 }
 
 // buildToolSystemPromptFromRaw is a convenience that accepts either OpenAI or
