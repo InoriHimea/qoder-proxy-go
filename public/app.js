@@ -250,15 +250,22 @@ async function fetchUsage() {
 
     // Render Overview
     const modelEntries = Object.entries(data.requests_by_model || {});
+    const tiers = data.model_tiers || {};
     let overviewHtml;
     if (modelEntries.length === 0) {
       overviewHtml = '<div class="empty-state">No requests tracked yet.</div>';
     } else {
       overviewHtml = `<div class="model-stats-grid" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap:12px;">`;
       for (const [model, count] of modelEntries) {
+        const tier = tiers[model];
+        const badge = tier === 'free'
+          ? '<span style="font-size:10px;background:var(--accent);color:#fff;padding:1px 6px;border-radius:4px;">FREE</span>'
+          : tier === 'new'
+            ? '<span style="font-size:10px;background:var(--info);color:#fff;padding:1px 6px;border-radius:4px;">NEW</span>'
+            : '';
         overviewHtml += `
           <div class="card card-sm" style="background:var(--elevated); padding: 12px;">
-            <div style="font-size:11px; color:var(--text3); margin-bottom:4px; text-overflow:ellipsis; overflow:hidden;">${escHtml(model)}</div>
+            <div style="font-size:11px; color:var(--text3); margin-bottom:4px; text-overflow:ellipsis; overflow:hidden;">${badge} ${escHtml(model)}</div>
             <div style="font-size:18px; font-weight:600;">${count}</div>
           </div>`;
       }

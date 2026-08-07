@@ -32,7 +32,7 @@
     {
       "id": "qmodel_38max",
       "label": "Qwen3.8-Max (test)",
-      "tier": "new",
+      "tier": "free",
       "description": "Test key — candidate for Qwen 3.8 Max (Alibaba)."
     },
     {

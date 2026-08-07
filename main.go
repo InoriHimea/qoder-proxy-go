@@ -14,7 +14,7 @@ import (
 
 var startTime time.Time
 
-const serverVersion = "3.12.7"
+const serverVersion = "3.12.8"
 
 func main() {
 	startTime = time.Now()
@@ -32,6 +32,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize usage manager: %v", err)
 	}
+	um.SetModelTiers(cm.Get().Models)
 
 	logDBPath := getEnv("LOG_DB_PATH", "data/logs.db")
 	if err := InitLogDB(logDBPath); err != nil {

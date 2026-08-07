@@ -21,6 +21,7 @@ type UsageStats struct {
 	TotalRequests   int            `json:"total_requests"`
 	TotalErrors     int            `json:"total_errors"`
 	RequestsByModel map[string]int `json:"requests_by_model"`
+	ModelTiers      map[string]string `json:"model_tiers,omitempty"`
 	RecentRecords   []UsageRecord  `json:"recent_records"`
 }
 
@@ -54,6 +55,19 @@ func (um *UsageManager) Load() error {
 		return err
 	}
 	return json.Unmarshal(data, &um.stats)
+}
+
+func (um *UsageManager) SetModelTiers(models []Model) {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+	if um.stats.ModelTiers == nil {
+		um.stats.ModelTiers = make(map[string]string)
+	} else {
+		clear(um.stats.ModelTiers)
+	}
+	for _, m := range models {
+		um.stats.ModelTiers[m.ID] = m.Tier
+	}
 }
 
 func (um *UsageManager) saveNoLock() error {

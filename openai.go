@@ -919,7 +919,9 @@ func handleModelsRefresh(ctx *fasthttp.RequestCtx, cm *ConfigManager) {
 		if !seen[line] {
 			seen[line] = true
 			tier := "paid"
-			if strings.Contains(line, "Flash") || line == "Auto" {
+			lowerLine := strings.ToLower(line)
+			if strings.Contains(lowerLine, "flash") || lowerLine == "auto" ||
+				strings.Contains(lowerLine, "38max") || strings.Contains(lowerLine, "free") {
 				tier = "free"
 			}
 			newModels = append(newModels, Model{
