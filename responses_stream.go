@@ -53,10 +53,118 @@ type responsesEmitter struct {
 
 	rawContent   strings.Builder
 	fullThinking strings.Builder
+
+	nativeTools *ParsedToolOutput
 }
 
 func newResponsesEmitter(w *bufio.Writer, id, model string, inputTokens int) *responsesEmitter {
 	return &responsesEmitter{w: w, id: id, model: model, inputTokens: inputTokens}
+}
+
+// nativeToolCallAccumulator joins fragmented native `delta.tool_calls` across
+// streaming chunks. Arguments arrive one slice at a time keyed by the stable
+// integer `index`; only the first fragment carries id + function.name. Later
+// fragments may carry only a single `arguments` string with an empty function.
+type nativeToolCallAccumulator struct {
+	toolsByIndex          map[int]*ToolCall
+	finishReasonToolCalls bool
+}
+
+func newNativeToolCallAccumulator() *nativeToolCallAccumulator {
+	return &nativeToolCallAccumulator{toolsByIndex: map[int]*ToolCall{}}
+}
+
+func (a *nativeToolCallAccumulator) feed(choice ChatChunkChoice) {
+	if len(choice.Delta.ToolCalls) == 0 && choice.FinishReason == nil {
+		return
+	}
+	if len(choice.Delta.ToolCalls) == 0 {
+		if choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
+			a.finishReasonToolCalls = true
+		}
+		return
+	}
+	a.finishReasonToolCalls = false
+	for _, rawTC := range choice.Delta.ToolCalls {
+		m, ok := rawTC.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		idxFloat, _ := m["index"].(float64)
+		idx := int(idxFloat)
+		tc := a.toolsByIndex[idx]
+		if tc == nil {
+			tc = &ToolCall{}
+			a.toolsByIndex[idx] = tc
+		}
+		if fn, ok := m["function"].(map[string]interface{}); ok && fn != nil {
+			if name, ok := fn["name"].(string); ok && name != "" && tc.Function.Name == "" {
+				tc.Function.Name = name
+			}
+			if args, ok := fn["arguments"].(string); ok && args != "" {
+				tc.Function.Arguments += args
+			}
+		}
+		if id, ok := m["id"].(string); ok && id != "" && tc.ID == "" {
+			tc.ID = id
+		}
+	}
+	if choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
+		a.finishReasonToolCalls = true
+	}
+}
+
+// resolve returns the accumulated calls as a ParsedToolOutput. The empty case
+// is nil so callers can distinguish "no tool calls seen" from "empty args".
+func (a *nativeToolCallAccumulator) resolve() *ParsedToolOutput {
+	if len(a.toolsByIndex) == 0 {
+		return nil
+	}
+	ordered := make([]ToolCall, 0, len(a.toolsByIndex))
+	for i := 0; i < len(a.toolsByIndex); i++ {
+		if tc, ok := a.toolsByIndex[i]; ok {
+			if tc.ID == "" {
+				tc.ID = generateCallId("call_")
+			}
+			if tc.Function.Arguments == "" {
+				tc.Function.Arguments = "{}"
+			}
+			if tc.Function.Name == "" {
+				tc.Function.Name = "call_" + tc.ID
+			}
+			ordered = append(ordered, *tc)
+		}
+	}
+	if len(ordered) == 0 {
+		return nil
+	}
+	return &ParsedToolOutput{Type: "tool_calls", ToolCalls: ordered}
+}
+
+// resolved reports true once the gateway has signalled tool_calls completion.
+func (a *nativeToolCallAccumulator) resolved() bool {
+	return a.finishReasonToolCalls
+}
+
+// result returns the accumulated ParsedToolOutput, consuming the accumulator.
+func (a *nativeToolCallAccumulator) result() *ParsedToolOutput {
+	out := a.resolve()
+	a.toolsByIndex = nil
+	a.finishReasonToolCalls = false
+	return out
+}
+
+// emitResolvedToolCalls drains any pre-text accumulator into the output stream
+// as a sequence of function_call items.
+func (e *responsesEmitter) emitResolvedToolCalls(parsed *ParsedToolOutput) {
+	if parsed == nil {
+		return
+	}
+	e.closeReasoning()
+	e.closeMessage()
+	for _, tc := range parsed.ToolCalls {
+		e.emitToolCall(tc)
+	}
 }
 
 func (e *responsesEmitter) event(typ string, payload map[string]interface{}) {
@@ -350,6 +458,9 @@ func (c *DirectClient) responsesCNPreamble(req ResponsesRequest) (ChatRequest, i
 
 func (c *DirectClient) handleResponsesChatCN(ctx *fasthttp.RequestCtx, req ResponsesRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
+	if !c.rateLimitOK(ctx, cfg.Token) {
+		return false
+	}
 	_, inputTokens, bodyJSON, modelKey, source, err := c.responsesCNPreamble(req)
 	if err != nil {
 		ctx.Error(fmt.Sprintf("Failed to build CN request body: %v", err), http.StatusInternalServerError)
@@ -377,6 +488,7 @@ func (c *DirectClient) handleResponsesChatCN(ctx *fasthttp.RequestCtx, req Respo
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	var contentBuilder, thinkingBuilder strings.Builder
 	var rawLines []string
+	acc := newNativeToolCallAccumulator()
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line != "" {
@@ -399,11 +511,13 @@ func (c *DirectClient) handleResponsesChatCN(ctx *fasthttp.RequestCtx, req Respo
 			continue
 		}
 		var chunk ChatChunk
-		if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
-			for _, choice := range chunk.Choices {
-				contentBuilder.WriteString(choice.Content())
-				thinkingBuilder.WriteString(choice.ReasoningContent())
-			}
+		if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			contentBuilder.WriteString(choice.Content())
+			thinkingBuilder.WriteString(choice.ReasoningContent())
+			acc.feed(choice)
 		}
 	}
 
@@ -416,6 +530,12 @@ func (c *DirectClient) handleResponsesChatCN(ctx *fasthttp.RequestCtx, req Respo
 
 	id := fmt.Sprintf("resp_%d", time.Now().UnixNano())
 	parsed := parseToolCallOutput(finalContent)
+	if acc.resolved() {
+		if r := acc.result(); r != nil {
+			parsed = r
+		}
+	}
+
 	respData := buildResponsesResponse(id, req.Model, finalContent, parsed, inputTokens, finalThinking)
 
 	ctx.SetStatusCode(http.StatusOK)
@@ -468,6 +588,7 @@ func (c *DirectClient) handleResponsesStreamCN(ctx *fasthttp.RequestCtx, req Res
 		scanner := bufio.NewScanner(hResp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 		classifier := &streamClassifier{}
+		acc := newNativeToolCallAccumulator()
 		var resolvedTools *ParsedToolOutput
 		var rawLines []string
 
@@ -482,10 +603,11 @@ func (c *DirectClient) handleResponsesStreamCN(ctx *fasthttp.RequestCtx, req Res
 			}
 			chunkJSON, done, errMsg, errStatus := parseCNSSELine(data)
 			if done {
+				AddSystemLog(fmt.Sprintf("[resp-stream] SSE done signal, lines=%d resolvedTools=%v", len(rawLines), resolvedTools != nil), "info", "direct")
 				break
 			}
 			if errMsg != "" {
-				AddSystemLog(fmt.Sprintf("CN gateway SSE error (status %d): %s", errStatus, errMsg), "error", "direct")
+				AddSystemLog(fmt.Sprintf("[resp-stream] SSE error (status %d): %s", errStatus, errMsg), "error", "direct")
 				e.fail(errMsg)
 				return
 			}
@@ -502,6 +624,21 @@ func (c *DirectClient) handleResponsesStreamCN(ctx *fasthttp.RequestCtx, req Res
 					e.fullThinking.WriteString(choice.ReasoningContent())
 					continue
 				}
+				// Native delta.tool_calls arrive fragmented and are terminated
+				// by a separate finish_reason chunk carrying no tool_calls at
+				// all, so the accumulator must see every choice.
+				acc.feed(choice)
+				if acc.resolved() {
+					if r := acc.result(); r != nil {
+						resolvedTools = r
+						AddSystemLog(fmt.Sprintf("[resp-stream] native tool_calls resolved, count=%d", len(r.ToolCalls)), "info", "direct")
+						e.emitResolvedToolCalls(resolvedTools)
+					}
+					continue
+				}
+				if len(choice.Delta.ToolCalls) > 0 {
+					continue
+				}
 				e.processThinking(choice.ReasoningContent())
 				content := choice.Content()
 				if content == "" {
@@ -513,6 +650,10 @@ func (c *DirectClient) handleResponsesStreamCN(ctx *fasthttp.RequestCtx, req Res
 			}
 		}
 
+		if err := scanner.Err(); err != nil {
+			AddSystemLog(fmt.Sprintf("[resp-stream] scanner error: %v, lines=%d", err, len(rawLines)), "error", "direct")
+		}
+		AddSystemLog(fmt.Sprintf("[resp-stream] scanner EOF, lines=%d resolvedTools=%v", len(rawLines), resolvedTools != nil), "info", "direct")
 		e.finish(classifier, resolvedTools)
 		finalizeResponsesLog(ctx, e, resolvedTools)
 		if logID, ok := ctx.UserValue("log_id").(string); ok && logID != "" {

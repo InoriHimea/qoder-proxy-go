@@ -247,8 +247,9 @@ func parseResponsesInput(input interface{}) []Message {
 				}
 			}
 			messages = append(messages, Message{
-				Role:    "user",
-				Content: fmt.Sprintf("<tool_result id=\"%s\">\n%s\n</tool_result>", callID, output),
+				Role:       "tool",
+				ToolCallID: callID,
+				Content:    output,
 			})
 		case "reasoning":
 			// Prior reasoning is not replayed to the CLI.
@@ -276,7 +277,7 @@ func responsesRequestToChatRequest(req ResponsesRequest, toolPrompt string) Chat
 		Stream:          req.Stream,
 		MaxTokens:       req.maxTokens(),
 		ReasoningEffort: req.reasoningEffort(),
-		Tools:           req.Tools,
+		Tools:           normalizeOpenAITools(req.Tools),
 		ToolChoice:      req.ToolChoice,
 	}
 }

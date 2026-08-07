@@ -1,6 +1,7 @@
 # Build Stage
 FROM golang:1.25-alpine AS builder
 ENV GOPROXY=https://goproxy.cn,direct
+ENV _SQLITE_EXT_RS_LOAD=disable
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,6 +11,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o qoder-proxy-go .
 # Runtime Stage
 FROM node:20-slim
 WORKDIR /app
+
+ENV _SQLITE_EXT_RS_LOAD=disable
 
 # node:20-slim ships without a CA bundle, which breaks TLS verification
 # for all outbound HTTPS (OAuth polling, token refresh, etc.)

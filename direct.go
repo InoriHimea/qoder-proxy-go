@@ -28,12 +28,16 @@ const cnGatewayHost = "https://gateway.qoder.com.cn"
 type DirectClient struct {
 	Config *ConfigManager
 
-	signerMu sync.Mutex
-	signer   *wasmsigner.Signer
+	signerMu  sync.Mutex
+	signer    *wasmsigner.Signer
+	rateLimit *rateLimiter
 }
 
 func NewDirectClient(cm *ConfigManager) *DirectClient {
-	return &DirectClient{Config: cm}
+	return &DirectClient{
+		Config:    cm,
+		rateLimit: initRateLimiterFromEnv(),
+	}
 }
 
 // rawJSONResponseBody wraps a raw HTTP response body so it round-trips
@@ -540,14 +544,46 @@ func buildCNRequestBody(req ChatRequest, cfg Config) (bodyJSON []byte, modelKey 
 	lastUserContent := ""
 	for _, m := range req.Messages {
 		content := extractContentText(m.Content)
-		if strings.ToLower(m.Role) == "system" {
+		role := strings.ToLower(m.Role)
+		if role == "system" {
 			if content != "" {
 				sysSb.WriteString(content + "\n\n")
 			}
 			continue
 		}
+		if role == "tool" {
+			// The gateway has no `role: tool` slot, so a prior tool result is
+			// folded into a user turn as a <tool_result> block, matching how
+			// the CLI path renders it in extractSystemAndPrompt.
+			id := m.ToolCallID
+			if id == "" {
+				id = "unknown"
+			}
+			rendered := fmt.Sprintf("<tool_result id=%q>\n%s\n</tool_result>", id, content)
+			msgs = append(msgs, map[string]interface{}{"role": "user", "content": rendered})
+			lastUserContent = rendered
+			continue
+		}
+		if role == "assistant" && len(m.ToolCalls) > 0 {
+			// Keep the assistant's own call visible, otherwise the next turn's
+			// <tool_result> has nothing to answer and the gateway loses the
+			// call/result linkage entirely.
+			var sb strings.Builder
+			if content != "" {
+				sb.WriteString(content + "\n\n")
+			}
+			for _, tc := range m.ToolCalls {
+				args := tc.Function.Arguments
+				if args == "" {
+					args = "{}"
+				}
+				sb.WriteString(fmt.Sprintf("<tool_use name=%q id=%q>\n%s\n</tool_use>\n\n", tc.Function.Name, tc.ID, args))
+			}
+			msgs = append(msgs, map[string]interface{}{"role": "assistant", "content": strings.TrimSpace(sb.String())})
+			continue
+		}
 		msgs = append(msgs, map[string]interface{}{"role": m.Role, "content": content})
-		if strings.ToLower(m.Role) == "user" {
+		if role == "user" {
 			lastUserContent = content
 		}
 	}
@@ -635,6 +671,9 @@ func buildCNRequestBody(req ChatRequest, cfg Config) (bodyJSON []byte, modelKey 
 	}
 
 	bodyJSON, err = json.Marshal(body)
+	if err == nil {
+		AddSystemLog(fmt.Sprintf("CN gateway request: model key=%s, is_reasoning=%v", req.Model, isReasoning), "info", "direct")
+	}
 	return bodyJSON, req.Model, "system", err
 }
 
@@ -686,6 +725,17 @@ func (c *DirectClient) refreshCNIdentity(cfg Config) Config {
 
 // sendCNRequest signs and POSTs bodyJSON to the CN gateway, re-signing and
 // retrying once on 401/403 (mirrors QEn()'s force-refresh-then-resign loop).
+// rateLimitOK checks the per-token rate limiter. If the token is over its
+// quota it writes a 429 response to ctx and returns false so the caller can
+// abort the request without hitting the upstream gateway.
+func (c *DirectClient) rateLimitOK(ctx *fasthttp.RequestCtx, token string) bool {
+	if c.rateLimit == nil || c.rateLimit.allow(token) {
+		return true
+	}
+	ctx.Error(http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+	return false
+}
+
 func (c *DirectClient) sendCNRequest(cfg Config, bodyJSON []byte, modelKey, source string) (*http.Response, error) {
 	client := newDirectHTTPClient(cfg)
 
@@ -757,6 +807,29 @@ func isCNSSESentinel(data string) bool {
 	return data == "[NOT_EXCEED_QUOTA]" || strings.HasPrefix(data, "[NOTIFICATIONS]")
 }
 
+// isCNStreamMetaLine matches the gateway's trailing `event:finish` payload
+// ({"firstTokenDuration":..,"totalDuration":..,"serverDuration":..}). It is
+// telemetry, not a chat chunk — forwarding it yields a chunk with
+// `choices: null`, which strict OpenAI clients reject.
+func isCNStreamMetaLine(data string) bool {
+	if !strings.HasPrefix(data, "{") {
+		return false
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(data), &meta); err != nil {
+		return false
+	}
+	if _, hasChoices := meta["choices"]; hasChoices {
+		return false
+	}
+	for _, key := range []string{"firstTokenDuration", "totalDuration", "serverDuration"} {
+		if _, ok := meta[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // parseCNSSELine inspects one SSE "data:" payload. If it is a non-200
 // error envelope or a quota-exceeded sentinel, ok=false and errMsg/errStatus
 // describe the failure. Otherwise chunk is the (already-unwrapped) chunk
@@ -774,6 +847,9 @@ func parseCNSSELine(data string) (chunk []byte, done bool, errMsg string, errSta
 	}
 	if isCNSSESentinel(data) {
 		return nil, true, "", 0
+	}
+	if isCNStreamMetaLine(data) {
+		return nil, false, "", 0
 	}
 	var env cnSSEEnvelope
 	if err := json.Unmarshal([]byte(data), &env); err == nil && env.StatusCodeValue != nil {
@@ -821,6 +897,9 @@ func buildDirectChatMessage(content, thinking string) map[string]interface{} {
 
 func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
+	if !c.rateLimitOK(ctx, cfg.Token) {
+		return false
+	}
 
 	bodyJSON, modelKey, source, err := buildCNRequestBody(req, cfg)
 	if err != nil {
@@ -875,9 +954,6 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 		}
 		var chunk ChatChunk
 		if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
-			if chunk.Model != "" {
-				model = chunk.Model
-			}
 			for _, choice := range chunk.Choices {
 				contentBuilder.WriteString(choice.Content())
 				thinkingBuilder.WriteString(choice.ReasoningContent())
@@ -932,6 +1008,63 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	return false
 }
 
+func classifyDirectChatChunk(classifier *streamClassifier, chunk ChatChunk, requestedModel string) ([]ChatChunk, *ParsedToolOutput) {
+	if requestedModel != "" {
+		chunk.Model = requestedModel
+	}
+	if len(chunk.Choices) == 0 {
+		return []ChatChunk{chunk}, nil
+	}
+	var output []ChatChunk
+	for _, choice := range chunk.Choices {
+		content := choice.Content()
+		if content == "" {
+			if choice.FinishReason != nil && classifier.held.Len() > 0 {
+				if remaining := classifier.flush(); remaining != "" {
+					textChunk := chunk
+					textChunk.Choices = []ChatChunkChoice{{Index: choice.Index, Delta: ChatChunkDelta{Content: remaining}}}
+					output = append(output, textChunk)
+				}
+			}
+			if choice.Delta.Role != "" || len(choice.Delta.ToolCalls) > 0 || choice.ReasoningContent() != "" || choice.FinishReason != nil {
+				output = append(output, chunk)
+			}
+			continue
+		}
+
+		plain, resolved := classifier.feed(content)
+		if plain != "" {
+			textChunk := chunk
+			textChunk.Choices = []ChatChunkChoice{{
+				Index: choice.Index,
+				Delta: ChatChunkDelta{Role: choice.Delta.Role, Content: plain, ReasoningContent: choice.ReasoningContent()},
+			}}
+			output = append(output, textChunk)
+		}
+		if resolved == nil {
+			continue
+		}
+
+		var calls []interface{}
+		for i, tc := range resolved.ToolCalls {
+			calls = append(calls, map[string]interface{}{
+				"index": i,
+				"id":    tc.ID,
+				"type":  "function",
+				"function": map[string]interface{}{
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				},
+			})
+		}
+		toolChunk := chunk
+		toolChunk.Choices = []ChatChunkChoice{{Index: choice.Index, Delta: ChatChunkDelta{ToolCalls: calls}, FinishReason: strPtr("tool_calls")}}
+		output = append(output, toolChunk)
+		return output, resolved
+	}
+	return output, nil
+}
+
 func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
 
@@ -975,6 +1108,9 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 		var fullThinking strings.Builder
 		var rawLines []string
 		streamErr := false
+		classifier := &streamClassifier{}
+		var resolvedTools *ParsedToolOutput
+		sawToolCalls := false
 		for scanner.Scan() {
 			line := scanner.Text()
 			if line != "" {
@@ -1001,37 +1137,39 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 				continue
 			}
 			var chunk ChatChunk
-			forwardJSON := chunkJSON
-			if err := json.Unmarshal(chunkJSON, &chunk); err == nil {
-				normalized := false
-				for i, choice := range chunk.Choices {
-					fullContent.WriteString(choice.Content())
-					fullThinking.WriteString(choice.ReasoningContent())
-					if choice.Delta.Content == "" && choice.Message.Content != "" {
-						chunk.Choices[i].Delta.Content = choice.Message.Content
-						normalized = true
-					}
-					if choice.Delta.ReasoningContent == "" && choice.Message.ReasoningContent != "" {
-						chunk.Choices[i].Delta.ReasoningContent = choice.Message.ReasoningContent
-						normalized = true
-					}
-				}
-				if normalized {
-					if b, merr := json.Marshal(chunk); merr == nil {
-						forwardJSON = b
-					}
+			if err := json.Unmarshal(chunkJSON, &chunk); err != nil {
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				fullContent.WriteString(choice.Content())
+				fullThinking.WriteString(choice.ReasoningContent())
+				if len(choice.Delta.ToolCalls) > 0 {
+					sawToolCalls = true
 				}
 			}
-			if _, werr := w.Write([]byte("data: ")); werr != nil {
-				return
+			if resolvedTools != nil {
+				continue
 			}
-			if _, werr := w.Write(forwardJSON); werr != nil {
-				return
+			chunks, resolved := classifyDirectChatChunk(classifier, chunk, req.Model)
+			for _, outChunk := range chunks {
+				forwardJSON, merr := json.Marshal(outChunk)
+				if merr != nil {
+					continue
+				}
+				if _, werr := w.Write([]byte("data: ")); werr != nil {
+					return
+				}
+				if _, werr := w.Write(forwardJSON); werr != nil {
+					return
+				}
+				if _, werr := w.Write([]byte("\n\n")); werr != nil {
+					return
+				}
+				w.Flush()
 			}
-			if _, werr := w.Write([]byte("\n\n")); werr != nil {
-				return
+			if resolved != nil {
+				resolvedTools = resolved
 			}
-			w.Flush()
 		}
 
 		if !streamErr {
@@ -1039,7 +1177,7 @@ func (c *DirectClient) handleStreamCN(ctx *fasthttp.RequestCtx, req ChatRequest,
 			w.Flush()
 		}
 
-		if !streamErr && fullContent.Len() == 0 {
+		if !streamErr && fullContent.Len() == 0 && !sawToolCalls && resolvedTools == nil {
 			dump := strings.Join(rawLines, " | ")
 			if len(dump) > 2000 {
 				dump = dump[:2000]
@@ -1105,6 +1243,9 @@ func (c *DirectClient) HandleAnthropicChat(ctx *fasthttp.RequestCtx, req Anthrop
 
 func (c *DirectClient) handleAnthropicChatCN(ctx *fasthttp.RequestCtx, req AnthropicRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
+	if !c.rateLimitOK(ctx, cfg.Token) {
+		return false
+	}
 
 	toolPrompt := ""
 	if len(req.Tools) > 0 {
@@ -1210,6 +1351,9 @@ func (c *DirectClient) handleAnthropicChatCN(ctx *fasthttp.RequestCtx, req Anthr
 
 func (c *DirectClient) handleAnthropicStreamCN(ctx *fasthttp.RequestCtx, req AnthropicRequest, um *UsageManager, started time.Time) bool {
 	cfg := c.Config.Get()
+	if !c.rateLimitOK(ctx, cfg.Token) {
+		return false
+	}
 
 	toolPrompt := ""
 	if len(req.Tools) > 0 {

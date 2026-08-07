@@ -5,7 +5,7 @@
       "name": "Default",
       "backend": "cn",
       "token": "dt-rgy2Lqvo0MgBnktkd4mI2GfH",
-      "use_direct_api": false,
+      "use_direct_api": true,
       "proxy_url": ""
     }
   ],
@@ -28,6 +28,12 @@
       "label": "Performance",
       "tier": "paid",
       "description": "Paid tier — high-performance model."
+    },
+    {
+      "id": "qmodel_38max",
+      "label": "Qwen3.8-Max (test)",
+      "tier": "new",
+      "description": "Test key — candidate for Qwen 3.8 Max (Alibaba)."
     },
     {
       "id": "qmodel_latest",

@@ -54,10 +54,9 @@ func TestParseResponsesInputItems(t *testing.T) {
 	if parsed.ToolCalls[0].Function.Arguments != `{"city":"NYC"}` {
 		t.Errorf("tool args = %q", parsed.ToolCalls[0].Function.Arguments)
 	}
-	// function_call_output must become a readable tool_result block.
-	out := msgs[2].Content.(string)
-	if !strings.Contains(out, `<tool_result id="call_1">`) || !strings.Contains(out, "72F sunny") {
-		t.Errorf("function_call_output = %q", out)
+	// function_call_output must become a standard OpenAI tool result message.
+	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "call_1" || msgs[2].Content != "72F sunny" {
+		t.Errorf("function_call_output = role=%q tool_call_id=%q content=%q", msgs[2].Role, msgs[2].ToolCallID, msgs[2].Content)
 	}
 }
 

@@ -102,6 +102,50 @@ func buildToolSystemPromptFromRaw(raw json.RawMessage, anthropic bool) string {
 	return buildToolSystemPrompt(tools)
 }
 
+// normalizeOpenAITools rewrites a tools array into the nested
+// {type:"function",function:{name,description,parameters}} shape. The
+// Responses API sends those fields flat at the top level, and the CN gateway
+// rejects that shape outright ("[FAIL]node:... Execution failed: null"),
+// so anything forwarded upstream has to be nested first.
+func normalizeOpenAITools(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return raw
+	}
+	out := make([]map[string]interface{}, 0, len(arr))
+	for _, t := range arr {
+		if fn, ok := t["function"].(map[string]interface{}); ok && fn != nil {
+			out = append(out, t)
+			continue
+		}
+		name, _ := t["name"].(string)
+		if name == "" {
+			// Not a function tool (e.g. a hosted web_search entry) — pass through.
+			out = append(out, t)
+			continue
+		}
+		fn := map[string]interface{}{"name": name}
+		if desc, ok := t["description"].(string); ok && desc != "" {
+			fn["description"] = desc
+		}
+		if params, ok := t["parameters"].(map[string]interface{}); ok {
+			fn["parameters"] = params
+		}
+		if strict, ok := t["strict"]; ok {
+			fn["strict"] = strict
+		}
+		out = append(out, map[string]interface{}{"type": "function", "function": fn})
+	}
+	normalized, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return normalized
+}
+
 // ── Tool result formatting (history round-trips) ────────────────────────────
 
 // formatToolResultForPrompt converts OpenAI `role: tool` messages and
