@@ -343,12 +343,22 @@ func (e *responsesEmitter) usage() *ResponsesUsage {
 func (e *responsesEmitter) finish(classifier *streamClassifier, resolvedTools *ParsedToolOutput) {
 	if resolvedTools == nil {
 		if rem := classifier.flush(); rem != "" {
+			if parsed := parseToolCallOutput(rem); parsed.Type == "tool_calls" {
+				e.closeReasoning()
+				e.closeMessage()
+				for _, tc := range parsed.ToolCalls {
+					e.emitToolCall(tc)
+				}
+			} else {
+				e.closeReasoning()
+				e.textDelta(parsed.PrefixText)
+				e.closeMessage()
+			}
+		} else {
 			e.closeReasoning()
-			e.textDelta(rem)
+			e.openMessage() // guarantee a message item even when output was empty
+			e.closeMessage()
 		}
-		e.closeReasoning()
-		e.openMessage() // guarantee a message item even when output was empty
-		e.closeMessage()
 	}
 	e.event("response.completed", map[string]interface{}{"response": e.snapshot("completed", e.items, e.usage(), nil)})
 }

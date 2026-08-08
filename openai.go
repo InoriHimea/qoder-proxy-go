@@ -396,9 +396,13 @@ func handleAnthropicMessages(ctx *fasthttp.RequestCtx, cm *ConfigManager, um *Us
 
 		if resolvedTools == nil {
 			if remaining := classifier.flush(); remaining != "" {
-				closeThinkingIfOpen()
-				openTextIfNeeded()
-				writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: idxPtr(textIndex), Delta: &AnthropicEventDelta{Type: "text_delta", Text: remaining}})
+				if parsed := parseToolCallOutput(remaining); parsed.Type == "tool_calls" {
+					resolvedTools = parsed
+				} else {
+					closeThinkingIfOpen()
+					openTextIfNeeded()
+					writeEvent("content_block_delta", AnthropicSSEEvent{Type: "content_block_delta", Index: idxPtr(textIndex), Delta: &AnthropicEventDelta{Type: "text_delta", Text: parsed.PrefixText}})
+				}
 			}
 			closeThinkingIfOpen()
 			openTextIfNeeded()
@@ -745,7 +749,24 @@ func handleChatCompletionsStream(ctx *fasthttp.RequestCtx, req ChatRequest, cm *
 
 		if resolvedTools == nil {
 			if remaining := classifier.flush(); remaining != "" {
-				sendChunk(ChatChunkDelta{Content: remaining}, nil)
+				if parsed := parseToolCallOutput(remaining); parsed.Type == "tool_calls" {
+					var tcs []interface{}
+					for i, tc := range parsed.ToolCalls {
+						tcs = append(tcs, map[string]interface{}{
+							"index": i,
+							"id":    tc.ID,
+							"type":  "function",
+							"function": map[string]interface{}{
+								"name":      tc.Function.Name,
+								"arguments": tc.Function.Arguments,
+							},
+						})
+					}
+					sendChunk(ChatChunkDelta{ToolCalls: tcs}, strPtr("tool_calls"))
+					resolvedTools = parsed
+				} else {
+					sendChunk(ChatChunkDelta{Content: parsed.PrefixText}, nil)
+				}
 			}
 		}
 
