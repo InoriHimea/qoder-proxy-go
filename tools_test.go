@@ -469,3 +469,47 @@ func TestParseToolCallsPayloadNameInArgumentsFallback(t *testing.T) {
 	}
 }
 
+
+// TestParseToolCallOutputEndToEndLeakedJSON verifies the full pipeline:
+// extractToolCallJSON (with escape repair) → parseToolCallsPayload (with
+// name-in-arguments fallback) resolves tool_calls that would otherwise leak
+// as plain text.
+func TestParseToolCallOutputEndToEndLeakedJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "regex_pattern_with_invalid_escapes_and_name_in_args",
+			input: `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\.min\(60\)|\.min\(8\)|\.min\(40\)|\.min\(80\)","name":"grep"}}]}`,
+		},
+		{
+			name: "second_leaked_json_with_brackets",
+			input: `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\.\[.*\.\min\(","name":"grep"}}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed := parseToolCallOutput(tt.input)
+			if parsed.Type != "tool_calls" {
+				t.Fatalf("Type = %q, want tool_calls (JSON would leak as text)", parsed.Type)
+			}
+			if len(parsed.ToolCalls) != 1 {
+				t.Fatalf("len(ToolCalls) = %d, want 1", len(parsed.ToolCalls))
+			}
+			tc := parsed.ToolCalls[0]
+			if tc.Function.Name != "grep" {
+				t.Errorf("name = %q, want grep", tc.Function.Name)
+			}
+			// Verify arguments don't contain "name" (it was extracted)
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				t.Fatalf("unmarshal arguments: %v", err)
+			}
+			if _, has := args["name"]; has {
+				t.Error("name should be removed from arguments after extraction")
+			}
+		})
+	}
+}
+

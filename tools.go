@@ -294,6 +294,16 @@ func extractToolCallJSON(text string) (jsonStr, prefixText string) {
 			after = skipDuplicateToolCalls(after)
 			return candidate, strings.TrimSpace(text[:start]) + after
 		}
+		// Try repairing invalid escape sequences (e.g. \. \( from regex
+		// patterns the model didn't double-escape). If the repaired
+		// version is valid JSON, accept it so parseToolCallsPayload can
+		// process it instead of leaking as plain text.
+		repaired := repairInvalidJSONEscapes(candidate)
+		if repaired != candidate && json.Valid([]byte(repaired)) {
+			after := text[end+1:]
+			after = skipDuplicateToolCalls(after)
+			return repaired, strings.TrimSpace(text[:start]) + after
+		}
 	}
 	return "", ""
 }
