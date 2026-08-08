@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -374,3 +375,97 @@ func TestNormalizeAnthropicToolUseMatchesExpectedOutputFormat(t *testing.T) {
 		t.Fatalf("arguments = %q", call.Function.Arguments)
 	}
 }
+
+// TestParseToolCallsPayloadRepairsInvalidEscapes verifies that parseToolCallsPayload
+// can recover from JSON with invalid escape sequences (e.g. \. \() that the model
+// emitted without proper double-escaping. These are common when regex patterns
+// appear in tool arguments.
+func TestParseToolCallsPayloadRepairsInvalidEscapes(t *testing.T) {
+	// The leaked JSON from the bug report: name inside arguments, plus invalid escapes
+	invalid := `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\\.min\(60\)|\\.min\(8\)|\\.min\(40\)|\\.min\(80\)","name":"grep"}}]}`
+
+	calls, ok := parseToolCallsPayload(invalid)
+	if !ok {
+		t.Fatalf("parseToolCallsPayload(invalid) = false, want true")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("len(calls) = %d, want 1", len(calls))
+	}
+
+	c := calls[0]
+	if c.Function.Name != "grep" {
+		t.Errorf("tool name = %q, want grep", c.Function.Name)
+	}
+
+	// Verify pattern was repaired and preserved correctly
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(c.Function.Arguments), &args); err != nil {
+		t.Fatalf("unmarshal arguments = %v", err)
+	}
+	pattern, ok := args["pattern"].(string)
+	if !ok {
+		t.Fatal("pattern not found in arguments")
+	}
+	// After repair, \\.(backslash-dot) becomes a literal backslash-dot in the string value
+	wantPattern := `\.min\(60\)|\.min\(8\)|\.min\(40\)|\.min\(80\)`
+	if pattern != wantPattern {
+		t.Errorf("pattern = %q, want %q", pattern, wantPattern)
+	}
+
+	// Verify name was extracted from arguments and removed
+	_, hasName := args["name"]
+	if hasName {
+		t.Error("name should have been extracted from arguments and removed")
+	}
+
+	// Also test valid JSON with invalid escapes (no name-in-arguments issue)
+	validJSONWithBadEscapes := `{"tool_calls":[{"name":"test","arguments":{"regex":"\\.foo\(bar\)"}}]}`
+	calls2, ok2 := parseToolCallsPayload(validJSONWithBadEscapes)
+	if !ok2 || len(calls2) != 1 {
+		t.Fatalf("parseToolCallsPayload(validJSONWithBadEscapes) = %v, %d, want true, 1", ok2, len(calls2))
+	}
+	if calls2[0].Function.Name != "test" {
+		t.Errorf("name = %q, want test", calls2[0].Function.Name)
+	}
+}
+
+// TestParseToolCallsPayloadNameInArgumentsFallback verifies that when models place
+// "name" inside "arguments" instead of at the tool-call level, we extract it.
+func TestParseToolCallsPayloadNameInArgumentsFallback(t *testing.T) {
+	// Correct schema: name at tool-call level
+	correct := `{"tool_calls":[{"name":"search","arguments":{"query":"hello"}}]}`
+	calls, ok := parseToolCallsPayload(correct)
+	if !ok || len(calls) != 1 || calls[0].Function.Name != "search" {
+		t.Fatalf("correct schema failed: %v, %d", ok, len(calls))
+	}
+
+	// Wrong schema: name inside arguments
+	wrong := `{"tool_calls":[{"arguments":{"query":"world","name":"search2"}}]}`
+	calls, ok = parseToolCallsPayload(wrong)
+	if !ok || len(calls) != 1 {
+		t.Fatalf("wrong schema = %v, %d, want true, 1", ok, len(calls))
+	}
+	if calls[0].Function.Name != "search2" {
+		t.Errorf("extracted name = %q, want search2", calls[0].Function.Name)
+	}
+
+	// Verify name was removed from arguments
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
+		t.Fatalf("unmarshal = %v", err)
+	}
+	if _, has := args["name"]; has {
+		t.Error("name should be removed from arguments after extraction")
+	}
+	if query, ok := args["query"].(string); !ok || query != "world" {
+		t.Errorf("query = %v, want world", args["query"])
+	}
+
+	// Both fields in wrong position should still work
+	bothWrong := `{"tool_calls":[{"arguments":{"name":"multi","other":"value"}}]}`
+	calls, ok = parseToolCallsPayload(bothWrong)
+	if !ok || len(calls) != 1 || calls[0].Function.Name != "multi" {
+		t.Fatalf("both wrong = %v, %d, want true, 1", ok, len(calls))
+	}
+}
+

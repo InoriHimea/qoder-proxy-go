@@ -513,7 +513,16 @@ func parseToolCallsPayload(jsonStr string) ([]ToolCall, bool) {
 			jsonStr = jsonStr[first : last+1]
 		}
 		if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
-			return nil, false
+			// Final attempt: repair invalid escape sequences (e.g. \. \(
+			// from regex patterns that the model didn't double-escape).
+			repaired := repairInvalidJSONEscapes(jsonStr)
+			if repaired == jsonStr {
+				return nil, false
+			}
+			jsonStr = repaired
+			if err := json.Unmarshal([]byte(jsonStr), &wrapper); err != nil {
+				return nil, false
+			}
 		}
 	}
 	if len(wrapper.ToolCalls) == 0 {
@@ -523,10 +532,21 @@ func parseToolCallsPayload(jsonStr string) ([]ToolCall, bool) {
 	now := time.Now().UnixNano()
 	for i, c := range wrapper.ToolCalls {
 		name, _ := c["name"].(string)
+		args := c["arguments"]
+		// Fallback: some models place "name" inside "arguments" instead of
+		// at the tool-call level. Extract and remove it from args so it
+		// doesn't leak into the arguments payload.
+		if name == "" {
+			if argsMap, ok := args.(map[string]interface{}); ok {
+				if innerName, ok := argsMap["name"].(string); ok && innerName != "" {
+					name = innerName
+					delete(argsMap, "name")
+				}
+			}
+		}
 		if name == "" {
 			continue
 		}
-		args := c["arguments"]
 		if args == nil {
 			args = map[string]interface{}{}
 		}
@@ -552,6 +572,37 @@ func parseToolCallsPayload(jsonStr string) ([]ToolCall, bool) {
 		return nil, false
 	}
 	return calls, true
+}
+// repairInvalidJSONEscapes fixes invalid escape sequences inside JSON
+// string values. Go's encoding/json rejects escapes like \. or \( that are
+// valid in regex but not in JSON; this function walks the string and
+// double-escapes any backslash that isn't followed by a character in the set
+// of valid JSON string escapes: \" \\ \/ \b \f \n \r \t \uXXXX.
+func repairInvalidJSONEscapes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\\' {
+			if i+1 >= len(s) {
+				b.WriteString(`\\`)
+				continue
+			}
+			next := s[i+1]
+			if next == '"' || next == '\\' || next == '/' || next == 'b' || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == 'u' {
+				b.WriteByte(ch)
+				b.WriteByte(next)
+				i++
+			} else {
+				// Invalid escape — double the backslash so it becomes a
+				// literal backslash in the parsed string value.
+				b.WriteString(`\\`)
+			}
+		} else {
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
