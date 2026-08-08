@@ -1008,6 +1008,22 @@ func (c *DirectClient) handleChatCN(ctx *fasthttp.RequestCtx, req ChatRequest, u
 	return false
 }
 
+func callsFromParsed(parsed *ParsedToolOutput) []interface{} {
+	var calls []interface{}
+	for i, tc := range parsed.ToolCalls {
+		calls = append(calls, map[string]interface{}{
+			"index": i,
+			"id":    tc.ID,
+			"type":  "function",
+			"function": map[string]interface{}{
+				"name":      tc.Function.Name,
+				"arguments": tc.Function.Arguments,
+			},
+		})
+	}
+	return calls
+}
+
 func classifyDirectChatChunk(classifier *streamClassifier, chunk ChatChunk, requestedModel string) ([]ChatChunk, *ParsedToolOutput) {
 	if requestedModel != "" {
 		chunk.Model = requestedModel
@@ -1020,9 +1036,17 @@ func classifyDirectChatChunk(classifier *streamClassifier, chunk ChatChunk, requ
 		content := choice.Content()
 		if content == "" {
 			if choice.FinishReason != nil && classifier.held.Len() > 0 {
-				if remaining := classifier.flush(); remaining != "" {
+				held := classifier.held.String()
+				if parsed := parseToolCallOutput(held); parsed.Type == "tool_calls" {
 					textChunk := chunk
-					textChunk.Choices = []ChatChunkChoice{{Index: choice.Index, Delta: ChatChunkDelta{Content: remaining}}}
+					textChunk.Choices = []ChatChunkChoice{{Index: choice.Index, Delta: ChatChunkDelta{Role: choice.Delta.Role, Content: parsed.PrefixText, ReasoningContent: choice.ReasoningContent()}}}
+					output = append(output, textChunk)
+					toolChunk := chunk
+					toolChunk.Choices = []ChatChunkChoice{{Index: choice.Index, Delta: ChatChunkDelta{ToolCalls: callsFromParsed(parsed)}, FinishReason: strPtr("tool_calls")}}
+					output = append(output, toolChunk)
+				} else if remaining := held; remaining != "" {
+					textChunk := chunk
+					textChunk.Choices = []ChatChunkChoice{{Index: choice.Index, Delta: ChatChunkDelta{Content: remaining, ReasoningContent: choice.ReasoningContent()}}}
 					output = append(output, textChunk)
 				}
 			}
