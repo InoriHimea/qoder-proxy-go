@@ -476,16 +476,24 @@ func TestParseToolCallsPayloadNameInArgumentsFallback(t *testing.T) {
 // as plain text.
 func TestParseToolCallOutputEndToEndLeakedJSON(t *testing.T) {
 	tests := []struct {
-		name  string
-		input string
+		name     string
+		input    string
+		wantName string
 	}{
 		{
-			name: "regex_pattern_with_invalid_escapes_and_name_in_args",
-			input: `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\.min\(60\)|\.min\(8\)|\.min\(40\)|\.min\(80\)","name":"grep"}}]}`,
+			name:     "regex_pattern_with_invalid_escapes_and_name_in_args",
+			input:    `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\.min\(60\)|\.min\(8\)|\.min\(40\)|\.min\(80\)","name":"grep"}}]}`,
+			wantName: "grep",
 		},
 		{
-			name: "second_leaked_json_with_brackets",
-			input: `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\.\[.*\.\min\(","name":"grep"}}]}`,
+			name:     "second_leaked_json_with_brackets",
+			input:    `{"tool_calls":[{"arguments":{"path":"F:/VsCodeProject/agent-platform/src","pattern":"\.\[.*\.\min\(","name":"grep"}}]}`,
+			wantName: "grep",
+		},
+		{
+			name:     "literal_newline_inside_command_string",
+			input:    "{\"tool_calls\":[{\"arguments\":{\"command\":\"cd /f/VsCodeProject/dev-linux-builder && uv run pytest -q --tb=no 2>&1 | tail\n-20\",\"i\":\"run tests\",\"timeout\":120},\"name\":\"bash\"}]}",
+			wantName: "bash",
 		},
 	}
 	for _, tt := range tests {
@@ -498,8 +506,8 @@ func TestParseToolCallOutputEndToEndLeakedJSON(t *testing.T) {
 				t.Fatalf("len(ToolCalls) = %d, want 1", len(parsed.ToolCalls))
 			}
 			tc := parsed.ToolCalls[0]
-			if tc.Function.Name != "grep" {
-				t.Errorf("name = %q, want grep", tc.Function.Name)
+			if tc.Function.Name != tt.wantName {
+				t.Errorf("name = %q, want %q", tc.Function.Name, tt.wantName)
 			}
 			// Verify arguments don't contain "name" (it was extracted)
 			var args map[string]interface{}

@@ -583,17 +583,35 @@ func parseToolCallsPayload(jsonStr string) ([]ToolCall, bool) {
 	}
 	return calls, true
 }
-// repairInvalidJSONEscapes fixes invalid escape sequences inside JSON
-// string values. Go's encoding/json rejects escapes like \. or \( that are
-// valid in regex but not in JSON; this function walks the string and
-// double-escapes any backslash that isn't followed by a character in the set
-// of valid JSON string escapes: \" \\ \/ \b \f \n \r \t \uXXXX.
+// repairInvalidJSONEscapes fixes two classes of invalid JSON that models
+// commonly emit inside tool_calls payloads:
+//
+//  1. Invalid escape sequences: \. \( etc. are valid in regex but not in
+//     JSON. Go's encoding/json rejects them outright. We double-escape any
+//     backslash not followed by a character in the set of valid JSON string
+//     escapes: \" \\ \/ \b \f \n \r \t \uXXXX.
+//
+//  2. Literal control characters inside string values: raw newlines, tabs,
+//     and other 0x00-0x1F bytes are forbidden inside JSON string values.
+//     We replace them with their standard escape forms (\n \t \r etc.).
+//
+// The function tracks string boundaries (quoted regions) so that structural
+// whitespace between tokens is left untouched — only control characters
+// inside "..." strings are escaped.
 func repairInvalidJSONEscapes(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	inString := false
+	escapeNext := false
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
-		if ch == '\\' {
+		if escapeNext {
+			escapeNext = false
+			b.WriteByte('\\')
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '\\' && inString {
 			if i+1 >= len(s) {
 				b.WriteString(`\\`)
 				continue
@@ -608,9 +626,33 @@ func repairInvalidJSONEscapes(s string) string {
 				// literal backslash in the parsed string value.
 				b.WriteString(`\\`)
 			}
-		} else {
-			b.WriteByte(ch)
+			continue
 		}
+		if ch == '"' {
+			inString = !inString
+			b.WriteByte(ch)
+			continue
+		}
+		if inString && ch < 0x20 {
+			// Literal control character inside a string value — replace
+			// with the standard JSON escape sequence.
+			switch ch {
+			case '\n':
+				b.WriteString(`\n`)
+			case '\r':
+				b.WriteString(`\r`)
+			case '\t':
+				b.WriteString(`\t`)
+			case '\b':
+				b.WriteString(`\b`)
+			case '\f':
+				b.WriteString(`\f`)
+			default:
+				b.WriteString(fmt.Sprintf(`\u%04x`, ch))
+			}
+			continue
+		}
+		b.WriteByte(ch)
 	}
 	return b.String()
 }
